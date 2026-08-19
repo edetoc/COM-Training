@@ -1,0 +1,790 @@
+# Module 2 — Activation, registration, and the registry
+
+**Time: 1 week. This module generates the single largest category of support tickets.**
+
+In Module 1 you called `CreateCalculator` — a plain C++ function. Real clients don't do that; they know only a GUID. This module explains how a GUID becomes a running object, and every way that can fail.
+
+---
+
+## 2.1 The activation question
+
+A client says:
+
+```cpp
+CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_INPROC_SERVER,
+                 IID_ICalculator, (void**)&pCalc);
+```
+
+Windows must answer: *given only this 128-bit number, which file contains the code, and how do I run it?*
+
+The answer lives in the **registry** (or, for registration-free COM, in a **manifest**). That is the entire mechanism. Understanding the exact lookup path is what lets you diagnose activation failures in seconds instead of hours.
+
+---
+
+## 2.2 The registry map
+
+Everything lives under `HKEY_CLASSES_ROOT` (`HKCR`), which is a **merged view**:
+
+```
+HKCR = HKEY_CURRENT_USER\Software\Classes      (per-user, wins on conflict)
+     + HKEY_LOCAL_MACHINE\Software\Classes     (per-machine)
+```
+
+> **Support fact #1:** `HKCU` wins. A per-user registration silently shadows a per-machine one. "It works for me but not for the customer" and "it works when I RDP but not as a service" are very often this.
+
+### The CLSID key — where an object's code lives
+
+```
+HKCR\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}
+    (Default)                = "Calculator Component"
+    │
+    ├── InprocServer32
+    │       (Default)        = "C:\Components\Calc.dll"
+    │       ThreadingModel   = "Apartment" | "Free" | "Both" | "Neutral"
+    │
+    ├── LocalServer32
+    │       (Default)        = "C:\Components\CalcSrv.exe"
+    │
+    ├── ProgID
+    │       (Default)        = "MyCompany.Calculator.1"
+    │
+    ├── VersionIndependentProgID
+    │       (Default)        = "MyCompany.Calculator"
+    │
+    ├── TypeLib
+    │       (Default)        = "{LIBID GUID}"
+    │
+    └── (Default value of an "AppID" named value) = "{APPID GUID}"
+```
+
+- **`InprocServer32`** → a DLL loaded into the *client's* process.
+- **`LocalServer32`** → an EXE launched as a *separate* process.
+- Both present? The `CLSCTX` flags decide, in the order the flags imply.
+
+### The ProgID keys — the human-readable alias
+
+```
+HKCR\MyCompany.Calculator.1
+    (Default)    = "Calculator Component"
+    └── CLSID
+            (Default) = "{A1B2C3D4-1111-4000-9000-000000000001}"
+
+HKCR\MyCompany.Calculator          <- version independent
+    └── CurVer
+            (Default) = "MyCompany.Calculator.1"
+```
+
+`CLSIDFromProgID(L"MyCompany.Calculator.1", &clsid)` walks exactly these keys. That's all `New-Object -ComObject MyCompany.Calculator` does before calling `CoCreateInstance`.
+
+### The Interface key — how a call crosses a boundary
+
+```
+HKCR\Interface\{IID}
+    (Default)          = "ICalculator"
+    ├── ProxyStubClsid32
+    │       (Default)  = "{CLSID of the proxy/stub, or {00020424-...} for typelib marshaling}"
+    ├── TypeLib
+    │       (Default)  = "{LIBID}"
+    │       Version    = "1.0"
+    └── NumMethods
+            (Default)  = "5"
+```
+
+> **Support fact #2:** this key is only consulted when a call must **cross an apartment or process boundary**. That's why the classic bug is "works in-process, `E_NOINTERFACE` out-of-process." Module 4 covers it.
+
+### The AppID key — process-wide settings for out-of-proc servers
+
+```
+HKCR\AppID\{APPID}
+    (Default)          = "Calculator Server"
+    RunAs              = "Interactive User" | "NT AUTHORITY\LocalService" | "DOMAIN\user"
+    DllSurrogate       = ""            <- empty string means "use dllhost.exe"
+    LaunchPermission   = <binary SD>
+    AccessPermission   = <binary SD>
+    AuthenticationLevel = dword
+```
+
+Module 7 covers these. For now, note that AppID is *per-process*, while CLSID is *per-class*.
+
+### The TypeLib key
+
+```
+HKCR\TypeLib\{LIBID}\1.0
+    (Default)      = "MyCompany Calculator 1.0 Type Library"
+    ├── 0\win64
+    │       (Default) = "C:\Components\Calc.dll"    <- or a .tlb path
+    └── FLAGS, HELPDIR
+```
+
+---
+
+## 2.3 WOW64 registry redirection — the #1 cause of "class not registered"
+
+On 64-bit Windows there are **two** COM registries:
+
+| Process bitness | Reads `HKLM\Software\Classes` from |
+|---|---|
+| 64-bit | `HKLM\Software\Classes` |
+| 32-bit | `HKLM\Software\Classes\Wow6432Node` (transparently redirected) |
+
+Consequences you must internalize:
+
+- A 32-bit `regsvr32` registers into `Wow6432Node`. A 64-bit client cannot see it.
+- A 64-bit client **cannot** load a 32-bit DLL into its process. Ever. Not with any flag.
+- `%SystemRoot%\System32\regsvr32.exe` is the **64-bit** one. `%SystemRoot%\SysWOW64\regsvr32.exe` is the **32-bit** one. (Yes, that naming is backwards. System32 = native; SysWOW64 = 32-bit-on-64.)
+
+**Diagnostic reflex:** when you see `0x80040154 REGDB_E_CLASSNOTREG`, question #1 is *"what bitness is the client, and what bitness is the server?"* — before you look at anything else.
+
+Check bitness of a DLL:
+
+```powershell
+# Quick machine-type check
+$bytes = [IO.File]::ReadAllBytes("C:\Components\Calc.dll")
+$peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+$machine  = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+switch ($machine) { 0x014c {"x86"} 0x8664 {"x64"} 0xAA64 {"ARM64"} default {"0x{0:X}" -f $machine} }
+```
+
+Or just `dumpbin /headers Calc.dll | findstr machine`.
+
+---
+
+## 2.4 The activation call chain
+
+```
+Client: CoCreateInstance(CLSID, pUnkOuter, CLSCTX, IID, &pv)
+   │
+   └─► CoCreateInstanceEx(...)                     ; the real entry point
+          │
+          └─► CoGetClassObject(CLSID, CLSCTX, ..., IID_IClassFactory, &pCF)
+                 │
+                 ├─ 1. Check the activation context (reg-free COM manifests)
+                 ├─ 2. Check the per-process class table (CoRegisterClassObject)
+                 ├─ 3. Ask the SCM (RpcSs) -> read HKCR\CLSID\{...}
+                 │        InprocServer32? -> LoadLibrary + GetProcAddress("DllGetClassObject")
+                 │        LocalServer32?  -> CreateProcess, wait for CoRegisterClassObject
+                 │
+                 └─► returns IClassFactory*
+          │
+          ├─► pCF->CreateInstance(pUnkOuter, IID, &pv)   ; the object is born here
+          └─► pCF->Release()
+```
+
+Two calls are happening. This matters: if you create many objects of the same class, calling `CoGetClassObject` once and reusing the `IClassFactory` is significantly faster than N `CoCreateInstance` calls.
+
+### `CLSCTX` flags
+
+| Flag | Meaning |
+|---|---|
+| `CLSCTX_INPROC_SERVER` | DLL in my process |
+| `CLSCTX_INPROC_HANDLER` | In-proc handler (rare; `InprocHandler32`) |
+| `CLSCTX_LOCAL_SERVER` | EXE on this machine |
+| `CLSCTX_REMOTE_SERVER` | On another machine |
+| `CLSCTX_ALL` | All of the above |
+| `CLSCTX_ACTIVATE_32_BIT_SERVER` / `_64_BIT_SERVER` | Force bitness (only meaningful for LocalServer) |
+| `CLSCTX_ENABLE_CLOAKING` | Use the thread token for activation |
+| `CLSCTX_NO_CUSTOM_MARSHAL` | Security hardening: refuse `IMarshal` |
+
+> **Support fact #3:** `CLSCTX_ALL` is convenient and dangerous. If the in-proc registration is broken but a LocalServer32 exists, you'll silently get an out-of-proc object with different threading, different security, and different performance. When diagnosing, **always** re-test with the specific flag you expect.
+
+### The other activation route: monikers
+
+`CoCreateInstance` says *"make me a new, empty object of class X."* Sometimes you instead want *"the object named by this string"* — a specific file, a WMI namespace, an **already-running** Excel, or an elevated instance. That's what **monikers** do, via `CoGetObject` / `MkParseDisplayName` and the Running Object Table.
+
+You'll need them for Module 7's elevation moniker, and every WMI connection string (`winmgmts:\\.\root\cimv2`) is one. See **[Appendix A §A.1](appendix-a-monikers-and-persistence.md#a1-monikers)**.
+
+Worth knowing now: moniker failures frequently bottom out as ordinary activation failures, so a `0x80040154` from `GetObject` sends you straight back to this module's flow.
+
+---
+
+## 2.5 Building a real in-proc server
+
+A COM DLL must export exactly four functions:
+
+```cpp
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv);
+STDAPI DllCanUnloadNow(void);
+STDAPI DllRegisterServer(void);
+STDAPI DllUnregisterServer(void);
+```
+
+### 2.5.1 `IClassFactory`
+
+```cpp
+struct IClassFactory : public IUnknown
+{
+    virtual HRESULT CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv) = 0;
+    virtual HRESULT LockServer(BOOL fLock) = 0;
+};
+```
+
+- `CreateInstance` makes one object. `pUnkOuter` is for **aggregation** — if it's non-null and you don't support aggregation, you **must** return `CLASS_E_NOAGGREGATION`.
+- `LockServer(TRUE)` keeps the server loaded even with zero objects, so a client can hold the factory across creations.
+
+#### What `pUnkOuter` actually is: aggregation
+
+You'll write `if (pUnkOuter) return CLASS_E_NOAGGREGATION;` in a moment, so here's what you're declining.
+
+COM has no implementation inheritance — you can't subclass someone else's coclass. To reuse a component there are two options:
+
+**Containment (delegation)** — the outer object holds the inner one privately and forwards calls. Simple, always works, and the client never learns the inner object exists.
+
+```cpp
+STDMETHODIMP COuter::DoThing() { return m_pInner->DoThing(); }   // one forwarding stub per method
+```
+
+**Aggregation** — the outer object exposes the inner object's interfaces *directly* to the client, with no forwarding code at all. `QueryInterface` on the outer hands back the inner's actual pointer.
+
+Aggregation exists because containment costs a forwarding stub per method, and an extra indirection per call, for interfaces you're passing through unchanged.
+
+The difficulty is Module 1's Rule 1: **every interface of a COM object must return the same `IUnknown`.** If the outer simply handed out the inner's pointer, the client could `QI(IID_IUnknown)` on it and get the *inner's* identity — two different answers from one logical object, and the object's identity and reference count would split in two.
+
+The fix is that an aggregatable object implements **two** `IUnknown`s:
+
+| | Purpose |
+|---|---|
+| **Non-delegating `IUnknown`** | The inner object's real one. Only the *outer* object uses it, to control the inner's lifetime. |
+| **Delegating `IUnknown`** | What the inner object exposes on all its *other* interfaces. Every call forwards to `pUnkOuter`. |
+
+So when a client calls `QueryInterface` or `Release` on an interface it got from the aggregate, the call lands on the **outer** object — one identity, one reference count, Rule 1 preserved.
+
+```
+   Client ──► IFoo (physically implemented by the INNER object)
+                 │
+                 └─ its QI/AddRef/Release delegate to ──► OUTER object's IUnknown
+```
+
+That's what `pUnkOuter` is: the outer object's `IUnknown`, passed in at creation so the inner knows who to delegate to. The contract has strict rules — when `pUnkOuter` is non-null the factory may **only** return `IID_IUnknown` (the non-delegating one), because handing back anything else would leak the inner identity before aggregation is wired up.
+
+**In practice:** aggregation is rare in new code. It's fiddly, easy to get wrong, and containment is nearly always fast enough. ATL supports it via `DECLARE_AGGREGATABLE` / `CComAggObject` (Module 6) if you need it. **Returning `CLASS_E_NOAGGREGATION` is a perfectly respectable, and by far the most common, answer.**
+
+What you must know for support work: if a client passes a non-null `pUnkOuter` and the server ignores it instead of refusing, you get an object that violates Rule 1 — producing intermittent `E_NOINTERFACE`, duplicate identities, and premature or missed destruction. Module 1's "intermittent `E_NOINTERFACE` is always a bug" note points here.
+
+### 2.5.2 Complete server: `Calc.cpp`
+
+```cpp
+#include <windows.h>
+#include <objbase.h>
+#include <olectl.h>       // SELFREG_E_CLASS
+#include <new>
+#include <strsafe.h>
+#include "Calculator.h"   // ICalculator from Module 1
+
+// {A1B2C3D4-1111-4000-9000-000000000001}   <-- generate your own!
+DEFINE_GUID(CLSID_Calculator,
+    0xa1b2c3d4, 0x1111, 0x4000, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01);
+
+static LONG   g_cObjects = 0;      // live objects
+static LONG   g_cLocks   = 0;      // LockServer count
+static HMODULE g_hModule = nullptr;
+
+// ------------------------------------------------------------------ object
+class Calculator : public ICalculator
+{
+    LONG m_cRef = 1;
+public:
+    Calculator()  { InterlockedIncrement(&g_cObjects); }
+    ~Calculator() { InterlockedDecrement(&g_cObjects); }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_ICalculator)
+            *ppv = static_cast<ICalculator*>(this);
+        else
+            return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_cRef); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        ULONG n = InterlockedDecrement(&m_cRef);
+        if (!n) delete this;
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE Add(long a, long b, long* r) override
+    { if (!r) return E_POINTER; *r = a + b; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Subtract(long a, long b, long* r) override
+    { if (!r) return E_POINTER; *r = a - b; return S_OK; }
+};
+
+// ----------------------------------------------------------------- factory
+class CalculatorFactory : public IClassFactory
+{
+public:
+    // The factory is a singleton with an artificially high ref count; it is
+    // never destroyed, so QI/AddRef/Release are trivial.
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IClassFactory)
+            *ppv = static_cast<IClassFactory*>(this);
+        else
+            return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef()  override { return InterlockedIncrement(&g_cLocks); }
+    ULONG STDMETHODCALLTYPE Release() override { return InterlockedDecrement(&g_cLocks); }
+
+    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (pUnkOuter) return CLASS_E_NOAGGREGATION;   // we don't support aggregation
+
+        Calculator* p = new (std::nothrow) Calculator();
+        if (!p) return E_OUTOFMEMORY;
+        HRESULT hr = p->QueryInterface(riid, ppv);
+        p->Release();
+        return hr;
+    }
+
+    HRESULT STDMETHODCALLTYPE LockServer(BOOL fLock) override
+    {
+        if (fLock) InterlockedIncrement(&g_cLocks);
+        else       InterlockedDecrement(&g_cLocks);
+        return S_OK;
+    }
+};
+
+static CalculatorFactory g_factory;   // static instance; never freed
+
+// ------------------------------------------------------------- DLL exports
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
+{
+    if (!ppv) return E_POINTER;
+    *ppv = nullptr;
+    if (rclsid != CLSID_Calculator) return CLASS_E_CLASSNOTAVAILABLE;
+    return g_factory.QueryInterface(riid, ppv);
+}
+
+STDAPI DllCanUnloadNow(void)
+{
+    return (g_cObjects == 0 && g_cLocks == 0) ? S_OK : S_FALSE;
+}
+
+// ------------------------------------------------------------ registration
+static HRESULT SetKeyValue(HKEY root, PCWSTR subkey, PCWSTR name, PCWSTR value)
+{
+    HKEY hKey = nullptr;
+    LONG rc = RegCreateKeyExW(root, subkey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                              KEY_WRITE, nullptr, &hKey, nullptr);
+    if (rc != ERROR_SUCCESS) return HRESULT_FROM_WIN32(rc);
+    rc = RegSetValueExW(hKey, name, 0, REG_SZ,
+                        reinterpret_cast<const BYTE*>(value),
+                        static_cast<DWORD>((wcslen(value) + 1) * sizeof(WCHAR)));
+    RegCloseKey(hKey);
+    return HRESULT_FROM_WIN32(rc);
+}
+
+STDAPI DllRegisterServer(void)
+{
+    WCHAR modulePath[MAX_PATH];
+    if (!GetModuleFileNameW(g_hModule, modulePath, ARRAYSIZE(modulePath)))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    WCHAR clsidStr[64];
+    StringFromGUID2(CLSID_Calculator, clsidStr, ARRAYSIZE(clsidStr));
+
+    WCHAR key[256];
+    // HKCR\CLSID\{...}
+    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s", clsidStr);
+    if (FAILED(SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, L"Calculator Component")))
+        return SELFREG_E_CLASS;
+
+    // HKCR\CLSID\{...}\InprocServer32
+    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s\\InprocServer32", clsidStr);
+    if (FAILED(SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, modulePath)))
+        return SELFREG_E_CLASS;
+    if (FAILED(SetKeyValue(HKEY_CLASSES_ROOT, key, L"ThreadingModel", L"Both")))
+        return SELFREG_E_CLASS;
+
+    // HKCR\CLSID\{...}\ProgID
+    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s\\ProgID", clsidStr);
+    SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, L"Training.Calculator.1");
+
+    // HKCR\Training.Calculator.1\CLSID
+    SetKeyValue(HKEY_CLASSES_ROOT, L"Training.Calculator.1", nullptr, L"Calculator Component");
+    SetKeyValue(HKEY_CLASSES_ROOT, L"Training.Calculator.1\\CLSID", nullptr, clsidStr);
+
+    return S_OK;
+}
+
+STDAPI DllUnregisterServer(void)
+{
+    WCHAR clsidStr[64];
+    StringFromGUID2(CLSID_Calculator, clsidStr, ARRAYSIZE(clsidStr));
+    WCHAR key[256];
+
+    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s", clsidStr);
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, key);
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"Training.Calculator.1");
+    return S_OK;
+}
+
+BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        g_hModule = hInst;
+        DisableThreadLibraryCalls(hInst);   // we don't need thread notifications
+    }
+    return TRUE;
+}
+```
+
+### 2.5.3 `Calc.def` — the exports
+
+```
+LIBRARY   Calc
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE
+```
+
+Set **Project → Linker → Input → Module Definition File** to `Calc.def`. Without this, name decoration hides your exports and `regsvr32` reports "entry-point DllRegisterServer was not found."
+
+### 2.5.4 The client
+
+```cpp
+#include <windows.h>
+#include <objbase.h>
+#include <cstdio>
+#include "Calculator.h"
+
+DEFINE_GUID(CLSID_Calculator,
+    0xa1b2c3d4, 0x1111, 0x4000, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01);
+
+int wmain()
+{
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr)) { wprintf(L"CoInitializeEx: 0x%08X\n", hr); return 1; }
+
+    ICalculator* pCalc = nullptr;
+    hr = CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_ICalculator, reinterpret_cast<void**>(&pCalc));
+    if (SUCCEEDED(hr))
+    {
+        long r = 0;
+        pCalc->Add(40, 2, &r);
+        wprintf(L"40 + 2 = %ld\n", r);
+        pCalc->Release();
+    }
+    else
+    {
+        wprintf(L"CoCreateInstance failed: 0x%08X\n", hr);
+    }
+
+    // Also demonstrate ProgID -> CLSID resolution.
+    CLSID fromProgID{};
+    hr = CLSIDFromProgID(L"Training.Calculator.1", &fromProgID);
+    wprintf(L"CLSIDFromProgID: 0x%08X\n", hr);
+
+    CoUninitialize();
+    return 0;
+}
+```
+
+---
+
+## 2.6 LAB 2.1 — Build, register, activate, and watch it happen
+
+1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
+2. Register from an **elevated** prompt (HKCR writes need admin):
+   ```powershell
+   regsvr32 C:\Components\Calc.dll
+   ```
+3. Run the client. Expect `40 + 2 = 42`.
+4. **Inspect the registry:**
+   ```powershell
+   $clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"
+   Get-ChildItem "Registry::HKEY_CLASSES_ROOT\CLSID\$clsid" -Recurse |
+       ForEach-Object { $_.Name; $_ | Get-ItemProperty | Format-List }
+   ```
+5. **Watch the SCM work.** Start Process Monitor, set a filter `Path contains A1B2C3D4-1111`, run the client, and read the trace. You will see the exact probe order: `RegOpenKey` on the CLSID, `InprocServer32`, `ThreadingModel`, then `CreateFile`/`Load Image` on the DLL. **Save this trace.** It is the reference picture of a *successful* activation; every failure is a deviation from it.
+6. **Break it:** `regsvr32 /u C:\Components\Calc.dll`, run the client again. Expect `0x80040154`. Look at the ProcMon trace now — you'll see `NAME NOT FOUND` on the CLSID key. That's the signature.
+
+### Register per-user instead of per-machine
+
+Modify `DllRegisterServer` to write to `HKEY_CURRENT_USER\Software\Classes` instead of `HKCR`, rebuild, and register **without elevation**. Confirm:
+
+- It works for your user.
+- It does *not* work for another user account.
+- `HKCU` shadows `HKLM` if both exist (register different DLL paths in each and see which wins).
+
+This experiment is worth an hour; it explains a whole family of tickets.
+
+---
+
+## 2.7 LAB 2.2 — Bitness
+
+1. Build `Calc.dll` as **x86**. Register with the 32-bit regsvr32:
+   ```powershell
+   C:\Windows\SysWOW64\regsvr32.exe C:\Components\x86\Calc.dll
+   ```
+2. Run the **x64** client. Expect `0x80040154`.
+3. Confirm the cause: the registration went to `HKLM\Software\Classes\Wow6432Node\CLSID\{...}`:
+   ```powershell
+   Get-Item "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}"
+   Get-Item "HKLM:\SOFTWARE\Classes\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}"   # not found
+   ```
+4. Run the **x86** client. It works.
+5. **Fix option A:** build and register both bitnesses.
+6. **Fix option B (the interesting one):** use a DLL surrogate so the 32-bit DLL runs out-of-process and any client bitness can reach it. Add an AppID and point the CLSID at it:
+
+```powershell
+$clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"
+$appid = "{B1B2C3D4-2222-4000-9000-000000000002}"
+
+New-Item -Path "HKLM:\SOFTWARE\Classes\AppID\$appid" -Force |
+    Set-ItemProperty -Name "(default)" -Value "Calculator Surrogate"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\AppID\$appid" -Name "DllSurrogate" -Value ""
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\$clsid" -Name "AppID" -Value $appid
+```
+
+Now call with `CLSCTX_LOCAL_SERVER`. The object runs in `dllhost.exe`. Verify with Process Explorer.
+
+> **Caveat:** surrogate activation requires the interface to be marshalable — a registered proxy/stub or a type library. Your `ICalculator` has neither yet, so this lab will fail with `E_NOINTERFACE` at the `QueryInterface` step. **That is the intended lesson.** Come back and finish this lab at the end of Module 4. Write the failure down now.
+
+---
+
+## 2.8 LAB 2.3 — Registration-free (Reg-Free) COM
+
+Modern deployment avoids the registry entirely: no admin rights, no machine-wide state, side-by-side versions, and clean uninstall. Activation data comes from **manifests** read into the process's **activation context**.
+
+### Step 1 — the server's assembly manifest, `Calc.manifest`
+
+```xml
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="Training.Calc"
+      version="1.0.0.0"
+      processorArchitecture="amd64" />
+  <file name="Calc.dll">
+    <comClass
+        clsid="{A1B2C3D4-1111-4000-9000-000000000001}"
+        threadingModel="Both"
+        progid="Training.Calculator.1"
+        description="Calculator Component" />
+  </file>
+</assembly>
+```
+
+### Step 2 — the client's application manifest, `CalcClient.exe.manifest`
+
+```xml
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="Training.CalcClient"
+      version="1.0.0.0"
+      processorArchitecture="amd64" />
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Training.Calc"
+          version="1.0.0.0"
+          processorArchitecture="amd64" />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+```
+
+### Step 3 — deploy and test
+
+```
+C:\RegFreeTest\
+    CalcClient.exe
+    CalcClient.exe.manifest
+    Calc.dll
+    Calc.manifest              <- name must match assemblyIdentity name + ".manifest"
+```
+
+1. **Fully unregister** the DLL: `regsvr32 /u Calc.dll`, and delete any leftover keys.
+2. Confirm the client now fails with `0x80040154`.
+3. Drop in the manifests. Run again — it works, with **nothing in the registry**.
+4. Verify in Process Monitor: no `HKCR\CLSID` probe at all. The activation context short-circuits it.
+
+### Common reg-free failures (memorize these)
+
+| Symptom | Cause |
+|---|---|
+| `0x80040154` still | Manifest not found (wrong filename), or the EXE has an *embedded* manifest which takes precedence over the external `.exe.manifest` file |
+| `0x800736B1` `ERROR_SXS_...` / app won't start at all | Malformed XML, mismatched `assemblyIdentity`, wrong `processorArchitecture` |
+| Works for the EXE but not from a DLL in the same process | Activation context is per-thread; a DLL must use `CreateActingContext`/`ActivateActCtx`, or embed its own dependency |
+| Works in debug, fails when deployed | The manifest wasn't copied, or VS embedded a manifest that omits the dependency |
+
+Diagnostics: check the **Event Viewer → Applications and Services Logs → Microsoft → Windows → SideBySide** log. `sxstrace.exe trace -logfile:sxs.etl` then `sxstrace parse` gives an exact reason.
+
+> **Note on embedded manifests:** if the linker embedded a manifest into `CalcClient.exe` (VS does by default), the external `.exe.manifest` is ignored. Either disable manifest embedding (`Linker → Manifest File → Generate Manifest = No`) or add your dependency to the embedded one via *Additional Manifest Files*.
+
+---
+
+## 2.9 Server lifetime and unloading
+
+### In-proc
+
+- COM calls `DllCanUnloadNow` when it feels like it — mainly from `CoFreeUnusedLibraries` / `CoFreeUnusedLibrariesEx`.
+- Return `S_OK` only when `g_cObjects == 0 && g_cLocks == 0`.
+- **Never** call `FreeLibrary` on yourself. **Never** unload while a call is in flight.
+- A DLL that never returns `S_OK` simply stays loaded — an annoyance, not a bug.
+- A DLL that returns `S_OK` too eagerly gets unloaded with live objects → the client's next vtable call jumps into unmapped memory. Classic `0xC0000005` with a garbage return address. **Support signature:** crash address is in no module; `!address <ptr>` says "free".
+
+### Out-of-proc
+
+- The EXE calls `CoRegisterClassObject` for each CLSID at startup, then pumps messages.
+- It calls `CoRevokeClassObject` and exits when object and lock counts hit zero.
+- Timing bug: exiting between "count hits zero" and "revoke completes" races with an incoming activation → `CO_E_SERVER_EXEC_FAILURE` or `RPC_E_DISCONNECTED` for the unlucky client. Real servers use `CoAddRefServerProcess`/`CoReleaseServerProcess`, which handle this correctly:
+
+```cpp
+// In every object's constructor / factory LockServer(TRUE):
+CoAddRefServerProcess();
+
+// In every destructor / LockServer(FALSE):
+if (CoReleaseServerProcess() == 0)
+    PostQuitMessage(0);      // safe: COM has already revoked the class objects
+```
+
+---
+
+## 2.10 The HRESULT triage table
+
+This is the heart of the support track. For each row: know the symptom, the first check, and the fix.
+
+| HRESULT | Symbol | Real-world causes | First diagnostic |
+|---|---|---|---|
+| `0x80040154` | `REGDB_E_CLASSNOTREG` | Not registered; **bitness mismatch**; HKCU vs HKLM; missing manifest; wrong CLSID | ProcMon filter on the CLSID → look for `NAME NOT FOUND`; check client & server bitness |
+| `0x80040155` | `REGDB_E_IIDNOTREG` | Interface has no proxy/stub or typelib registration; only surfaces across a boundary | Check `HKCR\Interface\{IID}\ProxyStubClsid32` |
+| `0x80040111` | `CLASS_E_CLASSNOTAVAILABLE` | DLL loaded fine but `DllGetClassObject` doesn't recognize that CLSID | Registration points at the wrong DLL, or CLSID typo |
+| `0x8007007E` | `ERROR_MOD_NOT_FOUND` | The server DLL was found but **one of its dependencies** wasn't (VC++ redist, a helper DLL) | ProcMon for `NAME NOT FOUND` on `*.dll`; check with Dependencies.exe |
+| `0x8007000E` | `E_OUTOFMEMORY` | Genuine OOM; or 32-bit address space exhaustion | Check commit/private bytes |
+| `0x80070005` | `E_ACCESSDENIED` | DCOM Launch/Activation permission; integrity level mismatch (medium client → high server); file ACL on the DLL | Event Viewer → System → DistributedCOM **10016**; `dcomcnfg` |
+| `0x80080005` | `CO_E_SERVER_EXEC_FAILURE` | EXE server crashed at startup, or didn't `CoRegisterClassObject` within the timeout; wrong `RunAs` identity/password; session 0 issue | Try launching the EXE manually; check Application event log for the server's crash |
+| `0x800706BA` | `RPC_S_SERVER_UNAVAILABLE` | Remote machine unreachable; firewall blocking TCP 135 or the dynamic port range; `RpcSs` stopped | `Test-NetConnection host -Port 135` |
+| `0x80010108` | `RPC_E_DISCONNECTED` | The server process died while you held a proxy | Check for a crash dump of the server |
+| `0x8001010E` | `RPC_E_WRONG_THREAD` | Raw interface pointer used on a different apartment | Module 3 |
+| `0x800401F0` | `CO_E_NOTINITIALIZED` | `CoInitializeEx` not called on this thread, or already `CoUninitialize`d | Check every thread that touches COM |
+| `0x80004002` | `E_NOINTERFACE` | Object genuinely lacks it; **or** marshaling isn't registered and you crossed a boundary | Does it work in-proc? If yes → marshaling |
+| `0x80070422` | service disabled | `RpcSs`/`DcomLaunch` disabled | `Get-Service RpcSs, DcomLaunch` |
+| `0x80029C4A` | `TYPE_E_CANTLOADLIBRARY` | Type library missing/unregistered/wrong bitness | Check `HKCR\TypeLib\{LIBID}` |
+
+### Decode any HRESULT fast
+
+```powershell
+# PowerShell
+[ComponentModel.Win32Exception]::new(0x8007007E).Message
+
+# or
+certutil -error 0x8007007e
+```
+
+```
+0:000> !error 0x8007007e        ; WinDbg
+```
+
+---
+
+## 2.11 LAB 2.4 — Reproduce every failure deliberately (support drill)
+
+This is the most valuable lab in the module. For each row below, **cause it on purpose** and record the ProcMon/Event Viewer signature in your notes.
+
+| # | How to cause it | Expected |
+|---|---|---|
+| 1 | Unregister the DLL | `0x80040154` |
+| 2 | Register x86 DLL, run x64 client | `0x80040154` |
+| 3 | Point `InprocServer32` at a non-existent path | `0x8007007E` or `0x80070002` |
+| 4 | Point `InprocServer32` at a real DLL that isn't a COM server | `0x80040111` (no `DllGetClassObject`) or `0x8007007F` |
+| 5 | Build the DLL against a VC++ runtime not installed on the box | `0x8007007E` |
+| 6 | Make `DllGetClassObject` return `CLASS_E_CLASSNOTAVAILABLE` for the right CLSID | `0x80040111` |
+| 7 | Remove `CoInitializeEx` from the client | `0x800401F0` |
+| 8 | Deny your own account Read on the `HKCR\CLSID\{...}` key | `0x80040154` (ProcMon shows `ACCESS DENIED`, not `NAME NOT FOUND` — learn the difference!) |
+| 9 | Deny Read on the DLL file itself | `0x80070005` |
+| 10 | Register a `LocalServer32` pointing at an EXE that exits immediately | `0x80080005` |
+
+Row 8 vs row 1 is the key discrimination skill: **`NAME NOT FOUND` = not registered; `ACCESS DENIED` = registered but you can't read it.** Both surface as `0x80040154` to the client. Only ProcMon distinguishes them.
+
+---
+
+## 2.12 Tooling: OleView.NET
+
+Install from https://github.com/tyranid/oleviewdotnet. Then practise:
+
+- **Registry → CLSIDs** — find your `Training.Calculator.1`, inspect its server, threading model, AppID.
+- **Registry → CLSIDs by Server** — "which classes does this DLL implement?" Enormously useful when a customer says "installing X broke Y."
+- **Registry → Interfaces** — check whether an IID has a proxy/stub.
+- **Registry → AppIDs with Access permissions** — the security view for Module 7.
+- **Object → Create Instance** — activate a class interactively and browse its interfaces without writing a client. This alone saves hours.
+- **Diff two machines** — export the registry view from a working and a broken machine and compare. This is the fastest route on "works on my machine" cases.
+
+### A useful PowerShell reconnaissance snippet
+
+```powershell
+function Get-ComRegistration {
+    param([string]$Clsid)
+    $paths = @(
+        "HKLM:\SOFTWARE\Classes\CLSID\$Clsid",
+        "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\$Clsid",
+        "HKCU:\SOFTWARE\Classes\CLSID\$Clsid"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path $p) {
+            [pscustomobject]@{
+                Hive    = $p
+                Inproc  = (Get-ItemProperty "$p\InprocServer32" -EA SilentlyContinue).'(default)'
+                Threading = (Get-ItemProperty "$p\InprocServer32" -EA SilentlyContinue).ThreadingModel
+                Local   = (Get-ItemProperty "$p\LocalServer32" -EA SilentlyContinue).'(default)'
+                AppID   = (Get-ItemProperty $p -EA SilentlyContinue).AppID
+            }
+        }
+    }
+}
+
+Get-ComRegistration "{A1B2C3D4-1111-4000-9000-000000000001}" | Format-List
+```
+
+Keep this in your toolkit. Run it as the *first* step on any `REGDB_E_CLASSNOTREG` ticket — it answers "which hive, which bitness, which server" in one shot.
+
+---
+
+## 2.13 Checkpoint
+
+1. A customer's 64-bit app fails with `0x80040154`. The vendor insists the component is registered, and `regedit` on the customer's box shows the CLSID under `HKEY_CLASSES_ROOT\CLSID`. What's your next question, and why might `regedit` be misleading you?
+2. What's the difference between `CoGetClassObject` and `CoCreateInstance`, and when would you deliberately use the former?
+3. Why must `IClassFactory::CreateInstance` return `CLASS_E_NOAGGREGATION` when `pUnkOuter` is non-null and you don't support aggregation?
+4. Your DLL returns `S_OK` from `DllCanUnloadNow` while a client still holds an object. Describe the crash and how you'd recognize it in a dump.
+5. Under what circumstances does `HKCR\Interface\{IID}` get read at all?
+6. A component works when the test app runs interactively but fails with `0x80070005` when the same code runs in a Windows service. Name three plausible causes.
+7. In ProcMon, you see `RegOpenKey HKCR\CLSID\{...} ACCESS DENIED`. What does that rule out?
+
+<details>
+<summary>Answers</summary>
+
+1. **"What bitness is the app, and what bitness is the registered DLL?"** `regedit` running as 64-bit shows `HKCR\CLSID` = the 64-bit view; a 32-bit-only registration lives under `Wow6432Node` and would *also* appear at `HKCR\CLSID` when viewed by a 32-bit tool. Also ask whether the registration is in HKCU for a *different* user than the one the app runs as.
+
+2. `CoCreateInstance` = `CoGetClassObject` + `CreateInstance` + `Release` of the factory. Use `CoGetClassObject` when creating many instances (amortize the SCM round-trip and registry lookup), when you need `IClassFactory2` licensing, or when you want to hold the server loaded via `LockServer`.
+
+3. Because the aggregator has already committed to the aggregation contract — it will delegate its own `IUnknown` to the inner object and expects the inner object to delegate back. If you ignore `pUnkOuter` and return a normal object, you'd break `QueryInterface` identity (Rule 1) for the aggregate, producing an object that violates COM's rules in ways that fail unpredictably later.
+
+4. The DLL is unmapped while the client holds an interface pointer. The client's next call loads the vptr (still pointing into the now-unmapped image) and jumps to unmapped memory → `0xC0000005` with an instruction pointer that belongs to **no loaded module**. In a dump: `lm` doesn't cover the faulting address, `!address <eip>` reports FREE/RESERVE, and the stack shows the client calling through an interface. Fix: correct the object/lock counting.
+
+5. Only when a call must cross an apartment or process/machine boundary — i.e. when COM needs to build a proxy/stub pair. Purely in-proc, same-apartment calls never touch it.
+
+6. (a) **Session 0 isolation** — a service can't drive an interactive-user COM server. (b) **DCOM Launch/Activation permissions** don't grant the service account. (c) The registration is under **HKCU of the interactive user**, invisible to `LocalSystem`/`NetworkService`. (Bonus: the service account lacks NTFS read on the DLL, or the service runs at a different integrity level.)
+
+7. It rules out "not registered." The key **exists**; the calling process's token can't read it. Look at the key's ACL and the caller's identity/integrity level — this is a permissions ticket, not a deployment ticket.
+
+</details>
+
+---
+
+**Next: [Module 3 — Threading and apartments](03-apartments-and-threading.md)**
