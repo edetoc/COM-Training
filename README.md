@@ -140,9 +140,7 @@ Then:
 
 Rewrite the client code three ways and compare: raw pointers with `goto Cleanup`, `CComPtr<T>` (ATL), and `winrt::com_ptr<T>`. Note where `&ptr` vs `ptr.put()` vs `ptr.GetAddressOf()` differ and why double-assignment through `&` leaks in some libraries.
 
-**Lab 1.3 — Leak hunt** — a timed blind drill: a colleague injects one lifetime bug, you find it with the trace, WinDbg, and Application Verifier.
-
-**Lab 1.4 — Spot the bug** — eight short snippets; call each one leak, crash, or correct, name the line, and state the fix. One is correct as written.
+**Lab 1.3 — Spot the bug** — eight short snippets; call each one leak, crash, or correct, name the line, and state the fix. One is correct as written. Optional follow-up: locate one of them with the trace, WinDbg, and Application Verifier instead of by reading.
 
 **Support angle**
 

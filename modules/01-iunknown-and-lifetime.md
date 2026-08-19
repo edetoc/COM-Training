@@ -331,7 +331,7 @@ With the tracing from Lab 1.1 switched on, that produces:
 
 **Four increments, four `Release` calls, ends at zero.** That balance is the entire discipline.
 
-Note what did *not* appear in the trace: steps (2) and (4). No line was emitted for them, because no reference was created. Getting those two wrong in the other direction — `AddRef`ing an alias or an `[in]` parameter — produces a leak just as surely as forgetting a `Release`. **Lab 1.4** (§1.11) is eight snippets built from exactly these mistakes.
+Note what did *not* appear in the trace: steps (2) and (4). No line was emitted for them, because no reference was created. Getting those two wrong in the other direction — `AddRef`ing an alias or an `[in]` parameter — produces a leak just as surely as forgetting a `Release`. **Lab 1.3** (§1.10) is eight snippets built from exactly these mistakes.
 
 #### The same code, two ways to break it
 
@@ -1046,34 +1046,11 @@ In a dump, for the crash family: `!heap -p -a <ptr>` will often show the block a
 
 ---
 
-## 1.10 LAB 1.3 — Leak hunt (support drill)
+## 1.10 LAB 1.3 — Spot the bug
 
 > **Requirements**
-> - **Tools:** WinDbg with the Microsoft symbol server configured (`_NT_SYMBOL_PATH=srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`); **Application Verifier** (Windows SDK, *Debugging Tools for Windows*); a colleague or a coin flip to inject the bug for you.
-> - **Elevation:** required — Application Verifier writes machine-wide image-execution options.
-> - **Bitness:** x64. Build **Release with symbols** (`/Zi` and linker `/DEBUG`).
-> - **Depends on:** Lab 1.1.
-> - **Time:** ~45 min, timed. Stop the clock and read the answer rather than running over.
-
-Do this as a timed exercise. It simulates a real ticket.
-
-1. Take your Lab 1.1 code. Have a colleague (or a coin flip) insert **one** of: a missing `Release`, an extra `Release`, or an `AddRef` without a matching `Release` — somewhere in `main.cpp`. Don't look.
-2. Build in Release with symbols (`/Zi /DEBUG`).
-3. Find it using only:
-   - the `OutputDebugString` trace,
-   - a WinDbg `bp` on `AddRef`/`Release` with `kb`,
-   - Application Verifier.
-4. Write down, in your `COM-Notes.md`: the symptom you saw first, the tool that localized it, and the fix.
-
-Target: under 15 minutes. Repeat until it's boring.
-
----
-
-## 1.11 LAB 1.4 — Spot the bug
-
-> **Requirements**
-> - **Tools:** none to begin with. Read these with the compiler closed; open Visual Studio afterwards only to check yourself.
-> - **Elevation:** not required.
+> - **Tools:** none to begin with. Read these with the compiler closed; open Visual Studio afterwards only to check yourself. The optional last step wants WinDbg and Application Verifier.
+> - **Elevation:** not required, except for the optional Application Verifier step.
 > - **Depends on:** §1.3 and §1.4. No code from the earlier labs.
 > - **Time:** ~30 min. Give yourself 60 seconds per snippet.
 
@@ -1221,9 +1198,19 @@ Every one of these is the same misunderstanding:
 
 Copy those two lists into your `COM-Notes.md` now. Practically every ref-counting ticket you will ever be handed is one of these eight shapes.
 
+### Optional — now find one without reading it
+
+Reading the bug off the page is the easy version. Tickets don't come with the snippet attached, so pick **one** of the broken snippets, paste it into your Lab 1.1 project, and locate it using only the tools from §1.9:
+
+- the `OutputDebugString` ref-count trace — count `ADDREF` lines against `RELEASE` lines;
+- a WinDbg `bp` on `AddRef` and `Release` with `kb`, then diff the two sets of stacks;
+- Application Verifier with **Basics → COM** and **Basics → Heaps** for the crash cases.
+
+Snippets 1 and 3 are the instructive ones here: nothing fails, nothing crashes, and the only evidence is a count that never reaches zero.
+
 ---
 
-## 1.12 Checkpoint
+## 1.11 Checkpoint
 
 1. Why must `QueryInterface` `AddRef` before returning, even when it returns `this` for the same IID you already hold?
 2. An object implements `IFoo` and `IBar` via multiple inheritance. Why is `pFoo == pBar` false, and how do you *correctly* test whether they're the same object?
@@ -1254,7 +1241,7 @@ Copy those two lists into your `COM-Notes.md` now. Practically every ref-countin
 
 ---
 
-## 1.13 Rules to carry forward
+## 1.12 Rules to carry forward
 
 1. Every `AddRef` gets exactly one `Release`.
 2. `QueryInterface` always `AddRef`s on success; always nulls `*ppv` on failure.
