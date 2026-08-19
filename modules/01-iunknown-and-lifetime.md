@@ -331,7 +331,7 @@ With the tracing from Lab 1.1 switched on, that produces:
 
 **Four increments, four `Release` calls, ends at zero.** That balance is the entire discipline.
 
-Note what did *not* appear in the trace: steps (2) and (4). No line was emitted for them, because no reference was created. Getting those two wrong in the other direction — `AddRef`ing an alias or an `[in]` parameter — produces a leak just as surely as forgetting a `Release`.
+Note what did *not* appear in the trace: steps (2) and (4). No line was emitted for them, because no reference was created. Getting those two wrong in the other direction — `AddRef`ing an alias or an `[in]` parameter — produces a leak just as surely as forgetting a `Release`. **Lab 1.4** (§1.11) is eight snippets built from exactly these mistakes.
 
 #### The same code, two ways to break it
 
@@ -1069,7 +1069,161 @@ Target: under 15 minutes. Repeat until it's boring.
 
 ---
 
-## 1.11 Checkpoint
+## 1.11 LAB 1.4 — Spot the bug
+
+> **Requirements**
+> - **Tools:** none to begin with. Read these with the compiler closed; open Visual Studio afterwards only to check yourself.
+> - **Elevation:** not required.
+> - **Depends on:** §1.3 and §1.4. No code from the earlier labs.
+> - **Time:** ~30 min. Give yourself 60 seconds per snippet.
+
+Eight snippets of plausible, review-passing code. For each one, write down three things **before** you open the answer key:
+
+| # | Verdict | Offending line | Fix |
+|---|---|---|---|
+| 1 | leak / crash / correct | | |
+| 2 | … | | |
+
+Assume `p`, `pFirst`, `pSecond`, and `pEnum` are valid pointers already owned by the enclosing scope, and that every call succeeds unless the code shows otherwise.
+
+**Not all eight are broken.** One is correct as written, and deciding which is part of the exercise.
+
+### Snippet 1
+
+```cpp
+IAdvancedCalculator* pAdv = nullptr;
+p->QueryInterface(IID_IAdvancedCalculator, (void**)&pAdv);
+pAdv->AddRef();
+
+long r = 0;
+pAdv->Divide(10, 2, &r);
+
+pAdv->Release();
+```
+
+### Snippet 2
+
+```cpp
+void Report(ICalculator* pCalc)          // [in] parameter
+{
+    long r = 0;
+    pCalc->Add(2, 3, &r);
+    printf("%ld\n", r);
+    pCalc->Release();
+}
+```
+
+### Snippet 3
+
+```cpp
+HRESULT Compute(ICalculator* p, long* out)
+{
+    IAdvancedCalculator* pAdv = nullptr;
+    HRESULT hr = p->QueryInterface(IID_IAdvancedCalculator, (void**)&pAdv);
+    if (FAILED(hr)) return hr;
+
+    hr = pAdv->Divide(10, 0, out);
+    if (FAILED(hr)) return hr;
+
+    pAdv->Release();
+    return S_OK;
+}
+```
+
+### Snippet 4
+
+```cpp
+IUnknown* pUnk = nullptr;
+pFirst ->QueryInterface(IID_IUnknown, (void**)&pUnk);
+pSecond->QueryInterface(IID_IUnknown, (void**)&pUnk);
+
+bool same = (pUnk == pFirst);
+pUnk->Release();
+```
+
+### Snippet 5
+
+```cpp
+class Dashboard
+{
+    ICalculator* m_pCalc = nullptr;
+public:
+    void Attach(ICalculator* p) { m_pCalc = p; }
+    void Refresh()              { long r = 0; m_pCalc->Add(1, 1, &r); }
+    ~Dashboard()                { if (m_pCalc) m_pCalc->Release(); }
+};
+```
+
+### Snippet 6
+
+```cpp
+void LogOnce(ICalculator* pCalc)         // [in] parameter
+{
+    long r = 0;
+    pCalc->Add(0, 0, &r);
+    printf("calc is alive: %ld\n", r);
+}
+```
+
+### Snippet 7
+
+```cpp
+ICalculator* p1 = nullptr;
+CreateCalculator(IID_ICalculator, (void**)&p1, "alias");
+
+ICalculator* p2 = p1;
+
+p2->Release();
+p1->Release();
+```
+
+### Snippet 8
+
+```cpp
+IUnknown* rg[10] = {};
+ULONG fetched = 0;
+
+pEnum->Next(10, rg, &fetched);           // returns S_FALSE, fetched == 4
+
+for (int i = 0; i < 10; ++i)
+    rg[i]->Release();
+```
+
+### Answer key
+
+<details>
+<summary>Check yourself</summary>
+
+| # | Verdict | Line | Why |
+|---|---|---|---|
+| 1 | **Leak** | `pAdv->AddRef();` | `QueryInterface` already incremented on your behalf. Two increments, one `Release`, count never reaches 0. Note that *every variable looks balanced* — one acquire, one release each — which is exactly why reviews wave it through. |
+| 2 | **Crash** | `pCalc->Release();` | An `[in]` parameter is **borrowed**. Releasing it destroys an object the caller still holds, so the caller's next call runs on freed memory. The crash surfaces in the *caller*, later, with nothing pointing back here. |
+| 3 | **Leak** | the second `if (FAILED(hr)) return hr;` | The error path returns without releasing. The happy path is correct, so this leaks only when something else has already gone wrong — i.e. precisely when the customer is already having a bad day. The real fix is `CComPtr`, not a third `Release` (§1.4). |
+| 4 | **Leak** | the second `QueryInterface` | It overwrites `pUnk` and destroys the only pointer to the first reference: two references, one `Release`. There is a second bug too — `pUnk == pFirst` is **not** the identity test. §1.3 Rule 1 requires `QI(IID_IUnknown)` on *both* sides and a comparison of the two results. |
+| 5 | **Crash** | `Attach` — the missing `AddRef` | Two bugs in one class. It stores the pointer for later use without taking a reference, so `Refresh` can run on a dead object; and the destructor releases a reference it never owned. Keeping a pointer beyond the current call is the defining case where you **must** `AddRef`. |
+| 6 | **Correct** | — | Borrowed pointer, used only for the duration of the call: no `AddRef`, no `Release`. This is right. It is also the shape that well-meaning people "fix" into Snippet 1 or Snippet 2. Leaving a borrowed pointer alone is correct code, not an oversight. |
+| 7 | **Crash** | `ICalculator* p2 = p1;` | Pointer assignment creates an **alias**, not a reference — it is not on §1.4's list of things that increment. Two `Release` calls against one reference; the second is an over-release. |
+| 8 | **Crash** | `rg[i]->Release()` once `i >= 4` | `Next` returned `S_FALSE` with `fetched == 4`, so only `rg[0..3]` hold references and `rg[4..9]` are still null. Loop to `fetched`, never to the count you asked for. This is the concrete cost of testing `hr == S_OK` instead of `FAILED(hr)` (§1.5) — and the reason `[out]` arrays are zero-initialized, so the mistake is a clean null-dereference instead of a jump through garbage. |
+
+**Scoring:** 6 or better and you're ready for Module 2. Below that, re-read §1.4's list of what increments the count, then come back tomorrow — not in ten minutes.
+
+</details>
+
+### The single question behind all eight
+
+Every one of these is the same misunderstanding:
+
+> Did this hand me a reference to **own**, or am I **borrowing** one?
+
+**You own it** (and owe exactly one `Release`) after: `QueryInterface`, `CoCreateInstance`, a successful `[out]` interface pointer, or an explicit `AddRef` you wrote yourself.
+
+**You own nothing** from: an `[in]` parameter, a plain pointer assignment, or a raw copy out of a member — and releasing any of them is theft from whoever does own it.
+
+Copy those two lists into your `COM-Notes.md` now. Practically every ref-counting ticket you will ever be handed is one of these eight shapes.
+
+---
+
+## 1.12 Checkpoint
 
 1. Why must `QueryInterface` `AddRef` before returning, even when it returns `this` for the same IID you already hold?
 2. An object implements `IFoo` and `IBar` via multiple inheritance. Why is `pFoo == pBar` false, and how do you *correctly* test whether they're the same object?
@@ -1100,7 +1254,7 @@ Target: under 15 minutes. Repeat until it's boring.
 
 ---
 
-## 1.12 Rules to carry forward
+## 1.13 Rules to carry forward
 
 1. Every `AddRef` gets exactly one `Release`.
 2. `QueryInterface` always `AddRef`s on success; always nulls `*ppv` on failure.
