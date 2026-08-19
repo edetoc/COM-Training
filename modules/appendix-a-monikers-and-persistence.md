@@ -7,6 +7,23 @@ Two families of interfaces that the main modules use but don't teach:
 - **Monikers** answer *"how do I name an object that doesn't exist yet?"*
 - **`IPersist*` / structured storage** answer *"how do I save an object and get it back?"*
 
+**Contents**
+
+- [A.1 Monikers](#a1-monikers)
+  - [A.1.1 The idea](#a11-the-idea)
+  - [A.1.2 `IMoniker`](#a12-imoniker)
+  - [A.1.3 The standard moniker types](#a13-the-standard-moniker-types)
+  - [A.1.4 Using monikers — the three APIs](#a14-using-monikers--the-three-apis)
+  - [A.1.5 The Running Object Table (ROT)](#a15-the-running-object-table-rot)
+  - [A.1.6 Moniker error codes](#a16-moniker-error-codes)
+- [A.2 Persistence — the `IPersist` family](#a2-persistence--the-ipersist-family)
+  - [A.2.1 The problem](#a21-the-problem)
+  - [A.2.2 The family](#a22-the-family)
+  - [A.2.3 `IStream`](#a23-istream)
+  - [A.2.4 Structured storage — `IStorage`](#a24-structured-storage--istorage)
+- [A.3 Checkpoint](#a3-checkpoint)
+- [A.4 Rules](#a4-rules)
+
 ---
 
 # A.1 Monikers

@@ -4,6 +4,23 @@
 
 Modules 1–7 taught you how COM works and how it breaks. This one is about **evidence**: what to collect, which tool answers which question, and how to reason from a dump you didn't produce, for code you don't have, on a machine you can't touch.
 
+**Contents**
+
+- [8.1 The evidence hierarchy](#81-the-evidence-hierarchy)
+- [8.2 Level 0 — HRESULT decoding](#82-level-0--hresult-decoding)
+- [8.3 Level 3 — Process Monitor for COM](#83-level-3--process-monitor-for-com)
+- [8.4 Level 5 — WinDbg for COM](#84-level-5--windbg-for-com)
+- [8.5 Level 6 — ETW tracing](#85-level-6--etw-tracing)
+- [8.6 Level 7 — Application Verifier and page heap](#86-level-7--application-verifier-and-page-heap)
+- [8.7 Leak hunting, end to end](#87-leak-hunting-end-to-end)
+- [8.8 The complete triage flowchart](#88-the-complete-triage-flowchart)
+- [8.9 LAB 8.1 — Blind dump analysis](#89-lab-81--blind-dump-analysis)
+- [8.10 LAB 8.2 — Build the support runbook (deliverable)](#810-lab-82--build-the-support-runbook-deliverable)
+- [8.11 CAPSTONE — `IDocumentStore`](#811-capstone--idocumentstore)
+- [8.12 Reference shelf](#812-reference-shelf)
+- [8.13 Final self-assessment](#813-final-self-assessment)
+- [8.14 The ten rules, consolidated](#814-the-ten-rules-consolidated)
+
 ---
 
 ## 8.1 The evidence hierarchy

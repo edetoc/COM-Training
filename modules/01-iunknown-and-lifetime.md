@@ -4,6 +4,21 @@
 
 If you understand this module completely, you can reason about 70% of real COM bugs. If you skim it, everything later will feel like arbitrary rules.
 
+**Contents**
+
+- [1.1 What an interface pointer actually is](#11-what-an-interface-pointer-actually-is)
+- [1.2 `IUnknown` — the interface every interface inherits](#12-iunknown--the-interface-every-interface-inherits)
+- [1.3 `QueryInterface` — the four rules](#13-queryinterface--the-four-rules)
+- [1.4 Reference counting — the rules that actually matter](#14-reference-counting--the-rules-that-actually-matter)
+- [1.5 `HRESULT` — read it properly](#15-hresult--read-it-properly)
+- [1.6 LAB 1.1 — Implement `IUnknown` by hand](#16-lab-11--implement-iunknown-by-hand)
+- [1.7 LAB 1.2 — Smart pointers](#17-lab-12--smart-pointers)
+- [1.8 Reference cycles](#18-reference-cycles)
+- [1.9 Debugging reference counts (support skills)](#19-debugging-reference-counts-support-skills)
+- [1.10 LAB 1.3 — Spot the bug](#110-lab-13--spot-the-bug)
+- [1.11 Checkpoint](#111-checkpoint)
+- [1.12 Rules to carry forward](#112-rules-to-carry-forward)
+
 ---
 
 ## 1.1 What an interface pointer actually is

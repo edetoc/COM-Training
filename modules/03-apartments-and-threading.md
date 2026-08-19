@@ -4,6 +4,24 @@
 
 Modules 1 and 2 assumed one thread. Reality has many. This module explains COM's threading model — why it exists, what it guarantees, and the precise ways it fails.
 
+**Contents**
+
+- [3.1 The problem apartments solve](#31-the-problem-apartments-solve)
+- [3.2 The three apartment types](#32-the-three-apartment-types)
+- [3.3 `ThreadingModel` — where an object actually lands](#33-threadingmodel--where-an-object-actually-lands)
+- [3.4 `CoInitializeEx` in detail](#34-coinitializeex-in-detail)
+- [3.5 The cardinal rule: never pass a raw interface pointer across apartments](#35-the-cardinal-rule-never-pass-a-raw-interface-pointer-across-apartments)
+- [3.6 Reentrancy — the subtlest part of COM](#36-reentrancy--the-subtlest-part-of-com)
+- [3.7 `IMessageFilter` — controlling reentrancy](#37-imessagefilter--controlling-reentrancy)
+- [3.8 Deadlocks](#38-deadlocks)
+- [3.9 Apartment-related error codes](#39-apartment-related-error-codes)
+- [3.10 LAB 3.1 — Prove that marshaling is required](#310-lab-31--prove-that-marshaling-is-required)
+- [3.11 LAB 3.2 — Build a deadlock, then diagnose it in WinDbg](#311-lab-32--build-a-deadlock-then-diagnose-it-in-windbg)
+- [3.12 LAB 3.3 — The ThreadingModel matrix](#312-lab-33--the-threadingmodel-matrix)
+- [3.13 .NET and apartments](#313-net-and-apartments)
+- [3.14 Checkpoint](#314-checkpoint)
+- [3.15 Rules to carry forward](#315-rules-to-carry-forward)
+
 ---
 
 ## 3.1 The problem apartments solve

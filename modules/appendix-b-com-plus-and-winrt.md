@@ -4,6 +4,25 @@
 
 Two ecosystems built *on* COM that you'll meet in tickets. Neither replaces what you learned — both are COM underneath, so every rule from Modules 1–7 still applies.
 
+**Contents**
+
+- [B.1 COM+ (and its ancestor, MTS)](#b1-com-and-its-ancestor-mts)
+  - [B.1.1 What it is and why it exists](#b11-what-it-is-and-why-it-exists)
+  - [B.1.2 What COM+ adds](#b12-what-com-adds)
+  - [B.1.3 Applications, contexts, and the catalog](#b13-applications-contexts-and-the-catalog)
+  - [B.1.4 Programming model](#b14-programming-model)
+  - [B.1.5 COM+ support essentials](#b15-com-support-essentials)
+- [B.2 WinRT — COM with new rules](#b2-winrt--com-with-new-rules)
+  - [B.2.1 WinRT *is* COM](#b21-winrt-is-com)
+  - [B.2.2 What changed](#b22-what-changed)
+  - [B.2.3 ASTA — the new apartment](#b23-asta--the-new-apartment)
+  - [B.2.4 Activation](#b24-activation)
+  - [B.2.5 Registration and packaging](#b25-registration-and-packaging)
+  - [B.2.6 WinRT support essentials](#b26-winrt-support-essentials)
+  - [B.2.7 Everything from Modules 1–7 still applies](#b27-everything-from-modules-17-still-applies)
+- [B.3 Checkpoint](#b3-checkpoint)
+- [B.4 Rules](#b4-rules)
+
 ---
 
 # B.1 COM+ (and its ancestor, MTS)

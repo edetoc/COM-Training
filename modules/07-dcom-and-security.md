@@ -4,6 +4,25 @@
 
 Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here.
 
+**Contents**
+
+- [7.1 The out-of-proc picture](#71-the-out-of-proc-picture)
+- [7.2 The AppID](#72-the-appid)
+- [7.3 Session 0 isolation](#73-session-0-isolation)
+- [7.4 `CoInitializeSecurity`](#74-coinitializesecurity)
+- [7.5 UAC, integrity levels, and elevation](#75-uac-integrity-levels-and-elevation)
+- [7.6 DCOM permissions in practice](#76-dcom-permissions-in-practice)
+- [7.7 Event 10016 — reading it correctly](#77-event-10016--reading-it-correctly)
+- [7.8 Remote DCOM](#78-remote-dcom)
+- [7.9 LAB 7.1 — Build an out-of-proc EXE server](#79-lab-71--build-an-out-of-proc-exe-server)
+- [7.10 LAB 7.2 — DLL surrogate](#710-lab-72--dll-surrogate)
+- [7.11 LAB 7.3 — Permissions and Event 10016](#711-lab-73--permissions-and-event-10016)
+- [7.12 LAB 7.4 — Remote DCOM](#712-lab-74--remote-dcom)
+- [7.13 Security checklist for reviewing a COM server](#713-security-checklist-for-reviewing-a-com-server)
+- [7.14 The DCOM support triage flow](#714-the-dcom-support-triage-flow)
+- [7.15 Checkpoint](#715-checkpoint)
+- [7.16 Rules to carry forward](#716-rules-to-carry-forward)
+
 ---
 
 ## 7.1 The out-of-proc picture

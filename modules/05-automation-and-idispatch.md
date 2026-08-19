@@ -4,6 +4,22 @@
 
 Everything so far assumed a compiled client that knows the vtable at build time. But VBScript, JScript, PowerShell, VBA, and old VB have no vtables and no headers. They discover methods **at runtime, by name**. This module explains how, and covers the family of technologies built on top: type libraries, events, enumerators, and rich error reporting.
 
+**Contents**
+
+- [5.1 Early binding vs late binding](#51-early-binding-vs-late-binding)
+- [5.2 `IDispatch`](#52-idispatch)
+- [5.3 Dual interfaces — the best of both worlds](#53-dual-interfaces--the-best-of-both-worlds)
+- [5.4 Implementing `IDispatch` the easy way](#54-implementing-idispatch-the-easy-way)
+- [5.5 The Automation type system](#55-the-automation-type-system)
+- [5.6 Rich errors: `IErrorInfo`](#56-rich-errors-ierrorinfo)
+- [5.7 Connection points — COM events](#57-connection-points--com-events)
+- [5.8 Enumerators and `For Each`](#58-enumerators-and-for-each)
+- [5.9 LAB 5.1 — A dual interface driven from four languages](#59-lab-51--a-dual-interface-driven-from-four-languages)
+- [5.10 LAB 5.2 — Events and the `Unadvise` leak](#510-lab-52--events-and-the-unadvise-leak)
+- [5.11 Automation error codes](#511-automation-error-codes)
+- [5.12 Checkpoint](#512-checkpoint)
+- [5.13 Rules to carry forward](#513-rules-to-carry-forward)
+
 ---
 
 ## 5.1 Early binding vs late binding

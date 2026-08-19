@@ -4,6 +4,22 @@
 
 In Module 1 you called `CreateCalculator` — a plain C++ function. Real clients don't do that; they know only a GUID. This module explains how a GUID becomes a running object, and every way that can fail.
 
+**Contents**
+
+- [2.1 The activation question](#21-the-activation-question)
+- [2.2 The registry map](#22-the-registry-map)
+- [2.3 WOW64 registry redirection — the #1 cause of "class not registered"](#23-wow64-registry-redirection--the-1-cause-of-class-not-registered)
+- [2.4 The activation call chain](#24-the-activation-call-chain)
+- [2.5 Building a real in-proc server](#25-building-a-real-in-proc-server)
+- [2.6 LAB 2.1 — Build, register, activate, and watch it happen](#26-lab-21--build-register-activate-and-watch-it-happen)
+- [2.7 LAB 2.2 — Bitness](#27-lab-22--bitness)
+- [2.8 LAB 2.3 — Registration-free (Reg-Free) COM](#28-lab-23--registration-free-reg-free-com)
+- [2.9 Server lifetime and unloading](#29-server-lifetime-and-unloading)
+- [2.10 The HRESULT triage table](#210-the-hresult-triage-table)
+- [2.11 LAB 2.4 — Reproduce every failure deliberately (support drill)](#211-lab-24--reproduce-every-failure-deliberately-support-drill)
+- [2.12 Tooling: OleView.NET](#212-tooling-oleviewnet)
+- [2.13 Checkpoint](#213-checkpoint)
+
 ---
 
 ## 2.1 The activation question

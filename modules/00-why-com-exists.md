@@ -2,6 +2,18 @@
 
 **Time: half a day. No coding yet.**
 
+**Contents**
+
+- [0.0 Start here: COM in plain language](#00-start-here-com-in-plain-language)
+- [0.1 The problem: C++ has no stable binary contract](#01-the-problem-c-has-no-stable-binary-contract)
+- [0.2 The insight](#02-the-insight)
+- [0.3 The three pillars](#03-the-three-pillars)
+- [0.4 Vocabulary — learn these now](#04-vocabulary--learn-these-now)
+- [0.5 The canonical "hello world"](#05-the-canonical-hello-world)
+- [0.6 Where COM lives today (why this matters for your job)](#06-where-com-lives-today-why-this-matters-for-your-job)
+- [0.7 Checkpoint](#07-checkpoint)
+- [0.8 Tooling setup (do this now)](#08-tooling-setup-do-this-now)
+
 ---
 
 ## 0.0 Start here: COM in plain language

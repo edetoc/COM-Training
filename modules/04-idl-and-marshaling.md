@@ -4,6 +4,21 @@
 
 Module 3 showed that crossing an apartment boundary requires a proxy. This module explains where proxies come from, how COM knows how to package your parameters, and who owns the memory.
 
+**Contents**
+
+- [4.1 Why IDL exists](#41-why-idl-exists)
+- [4.2 IDL by example](#42-idl-by-example)
+- [4.3 The memory-management rules](#43-the-memory-management-rules)
+- [4.4 The three kinds of marshaling](#44-the-three-kinds-of-marshaling)
+- [4.5 The "works in-proc, fails out-of-proc" bug](#45-the-works-in-proc-fails-out-of-proc-bug)
+- [4.6 LAB 4.1 — Author IDL, compile with MIDL, read the output](#46-lab-41--author-idl-compile-with-midl-read-the-output)
+- [4.7 LAB 4.2 — Break and fix marshaling](#47-lab-42--break-and-fix-marshaling)
+- [4.8 LAB 4.3 — Memory ownership, verified](#48-lab-43--memory-ownership-verified)
+- [4.9 Versioning: never modify a published interface](#49-versioning-never-modify-a-published-interface)
+- [4.10 Reading NDR failures](#410-reading-ndr-failures)
+- [4.11 Checkpoint](#411-checkpoint)
+- [4.12 Rules to carry forward](#412-rules-to-carry-forward)
+
 ---
 
 ## 4.1 Why IDL exists

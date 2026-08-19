@@ -4,6 +4,21 @@
 
 Modules 1–5 built everything by hand so you'd understand the machinery. Nobody writes production COM that way. This module covers the frameworks that remove the boilerplate — and, more importantly, what each one is doing underneath so you can debug it.
 
+**Contents**
+
+- [6.1 What the frameworks actually replace](#61-what-the-frameworks-actually-replace)
+- [6.2 ATL — the Active Template Library](#62-atl--the-active-template-library)
+- [6.3 WRL — Windows Runtime C++ Template Library](#63-wrl--windows-runtime-c-template-library)
+- [6.4 WIL — Windows Implementation Library](#64-wil--windows-implementation-library)
+- [6.5 C++/WinRT for classic COM](#65-cwinrt-for-classic-com)
+- [6.6 .NET interop: RCW and CCW](#66-net-interop-rcw-and-ccw)
+- [6.7 LAB 6.1 — Rewrite the Module 2 server in ATL](#67-lab-61--rewrite-the-module-2-server-in-atl)
+- [6.8 LAB 6.2 — Cross-language interop, both directions](#68-lab-62--cross-language-interop-both-directions)
+- [6.9 LAB 6.3 — Reproduce the RCW bugs](#69-lab-63--reproduce-the-rcw-bugs)
+- [6.10 Choosing a framework](#610-choosing-a-framework)
+- [6.11 Checkpoint](#611-checkpoint)
+- [6.12 Rules to carry forward](#612-rules-to-carry-forward)
+
 ---
 
 ## 6.1 What the frameworks actually replace
