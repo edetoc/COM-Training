@@ -458,6 +458,13 @@ The source generator emits the marshaling code at compile time — AOT-compatibl
 
 ## 6.7 LAB 6.1 — Rewrite the Module 2 server in ATL
 
+> **Requirements**
+> - **Tools:** Visual Studio with the optional component **C++ ATL for latest build tools (x86 & x64)**. It is *not* installed by default with *Desktop development with C++* — if you have no *ATL Project* template, that is why. Add it in the VS Installer.
+> - **Elevation:** required for `regsvr32`.
+> - **Bitness:** x64, matching the Module 2 client you reuse.
+> - **Depends on:** the hand-written Module 2 server — kept, not deleted. The comparison table is the deliverable.
+> - **Time:** ~2 h.
+
 1. **File → New → Project → ATL Project**, DLL, no attributes.
 2. Add a **Simple Object** (`CCalculator`) via the wizard: choose "Dual" interface, "Both" threading, "Support ISupportErrorInfo", "Support Connection Points".
 3. Add `Add`, `Subtract`, `Describe`, and a `Precision` property through the IDL editor / Add Method wizard.
@@ -488,6 +495,14 @@ Understanding that `CComObject<T>` is the thing actually instantiated (not `T`) 
 ---
 
 ## 6.8 LAB 6.2 — Cross-language interop, both directions
+
+> **Requirements**
+> - **Tools:** the **.NET SDK** (.NET 8 or later) for the `EnableComHosting` path, **and** the .NET Framework 4.x developer pack if you want to compare `regasm`/`tlbimp` — those tools are Framework-only and their absence is itself a support lesson. Visual Studio C++ for the native client.
+> - **Elevation:** required — `regsvr32` on the generated `*.comhost.dll`.
+> - **Bitness:** the comhost is **architecture-specific**. Publish it for the same architecture as the calling client (`-r win-x64`), or you reproduce `0x80040154`.
+> - **Depends on:** the Lab 6.1 ATL server for Direction 2.
+> - **Extra machine:** Direction 3 needs a **clean VM or second machine** that does not have the interop assembly deployed — on your dev box the failure will not reproduce.
+> - **Time:** ~3 h.
 
 ### Direction 1: C# server, C++ client
 
@@ -532,6 +547,13 @@ Build the C# client with `<EmbedInteropTypes>false</EmbedInteropTypes>`, deploy 
 ---
 
 ## 6.9 LAB 6.3 — Reproduce the RCW bugs
+
+> **Requirements**
+> - **Tools:** the .NET SDK and the Visual Studio debugger. Run each case in the debugger — several of these bugs are only visible as a *timing* difference in when the finalizer runs.
+> - **Elevation:** required once, to register `Training.Calculator.1`.
+> - **Bitness:** match the registered server.
+> - **Depends on:** a registered `Training.Calculator.1` (Lab 6.1) with the Module 1 ref-count tracing still compiled in.
+> - **Time:** ~1 h.
 
 ```csharp
 using System;

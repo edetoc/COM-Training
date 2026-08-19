@@ -420,6 +420,14 @@ COM PROBLEM
 
 ## 8.9 LAB 8.1 — Blind dump analysis
 
+> **Requirements**
+> - **Tools:** WinDbg with the symbol server configured; **ProcDump** or Task Manager → *Create dump file* to capture the dumps; `gflags`/page heap for scenario 2; `!cs` and `!heap` extensions (built in).
+> - **Elevation:** required for `gflags` and for dumping processes you do not own.
+> - **Bitness:** the debugger must match the dump, and the dump must match the target — a 32-bit process dumped by 64-bit Task Manager gives you a useless wow64 stack. Use `procdump -64` deliberately.
+> - **People:** a colleague to inject the bugs, or your own labelled builds prepared **at least a week earlier**. Analysing a bug you planted this morning proves nothing.
+> - **Depends on:** the labs from Modules 1–7 — they are the bodies the bugs get injected into.
+> - **Time:** 15 min per dump, strictly timed.
+
 A drill. Have a colleague (or your future self, a week later) produce dumps from a modified version of your labs without telling you what was changed. For each dump, in under 15 minutes, produce:
 
 1. The failure mode (hang / crash / leak).
@@ -444,6 +452,11 @@ Log every run in your notes with: *symptom seen first → tool that localized it
 ---
 
 ## 8.10 LAB 8.2 — Build the support runbook (deliverable)
+
+> **Requirements**
+> - **Tools:** a text editor. This is a **writing** deliverable, not a build — no compiler, no elevation, no test machine.
+> - **Depends on:** your `COM-Notes.md` and the failure signatures you recorded in every previous lab. If a lab's notes are thin, that entry will be thin — go back and re-run it rather than inventing the evidence.
+> - **Time:** ~3 h.
 
 For each HRESULT below, write a runbook entry with **exactly** these fields:
 

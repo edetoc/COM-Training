@@ -320,6 +320,13 @@ This is also the reason **Lab 2.2's surrogate experiment failed**. Go back and f
 
 ## 4.6 LAB 4.1 — Author IDL, compile with MIDL, read the output
 
+> **Requirements**
+> - **Tools:** a **Developer PowerShell for VS** or *x64 Native Tools Command Prompt* — this is what puts `midl.exe` on `PATH`. A plain PowerShell window will fail with "midl is not recognized." Plus `New-Guid` or `guidgen.exe`.
+> - **Elevation:** not required — this lab only compiles.
+> - **Bitness:** `/env x64`, matching your build.
+> - **Depends on:** the IDL from §4.2. Generate **real** GUIDs; do not reuse the placeholders.
+> - **Time:** ~90 min — most of it spent reading the generated files, which is the point.
+
 ### Step 1 — write it
 
 Save the IDL from §4.2 as `Calculator.idl`. Generate real GUIDs.
@@ -418,6 +425,13 @@ Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\{A1B2C3D4-0001-4000-9000
 
 ## 4.7 LAB 4.2 — Break and fix marshaling
 
+> **Requirements**
+> - **Tools:** Developer PowerShell (for `midl`), Visual Studio C++, `regsvr32`, Process Explorer.
+> - **Elevation:** required — registering `CalcPS.dll` and writing the AppID keys.
+> - **Bitness:** build and register the proxy/stub DLL for **both x86 and x64**; the surrogate step deliberately pairs a 32-bit DLL with a 64-bit client, and each side loads its own proxy.
+> - **Depends on:** Lab 4.1 (proxy/stub built) and Lab 2.2 (the surrogate registration you left failing).
+> - **Time:** ~2 h.
+
 1. With the PS DLL registered, redo **Lab 2.2's surrogate experiment**. It now works: your 32-bit DLL runs in `dllhost.exe` and a 64-bit client talks to it. Confirm with Process Explorer that `dllhost.exe` has loaded your DLL.
 
 2. `regsvr32 /u CalcPS.dll`. Re-run. Record the exact HRESULT and where it fails (activation vs. first call).
@@ -462,6 +476,13 @@ Write that error into your notes — you *will* see a developer hit it.
 ---
 
 ## 4.8 LAB 4.3 — Memory ownership, verified
+
+> **Requirements**
+> - **Tools:** Visual Studio C++ with **ATL** (`atlbase.h`, `atlsafe.h`); **page heap** via `gflags.exe` or Application Verifier (Windows SDK); WinDbg for `!heap`.
+> - **Elevation:** required — `gflags` and Application Verifier write machine-wide image-execution options. Turn the flags **off** when you finish; page heap left enabled will slow the image down permanently.
+> - **Bitness:** x64.
+> - **Depends on:** Lab 4.1's `ICalculator` (you need `Describe`, `Checksum`, and `GetHistory`).
+> - **Time:** ~90 min.
 
 Write a client that exercises every allocation rule, then prove correctness with tooling.
 

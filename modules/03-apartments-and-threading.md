@@ -582,6 +582,13 @@ Tearing down an STA while other apartments hold proxies to its objects yields `R
 
 ## 3.10 LAB 3.1 — Prove that marshaling is required
 
+> **Requirements**
+> - **Tools:** Visual Studio C++ with **ATL** (`atlbase.h` for `CComPtr`); WinDbg for the `dps` vtable comparison in the exercises.
+> - **Elevation:** required once, to register the DLL.
+> - **Bitness:** x64 throughout.
+> - **Depends on:** the Module 1 `Calculator`, packaged as the Module 2 in-proc server and registered with **`ThreadingModel = Apartment`** — without that value COM will not enforce the STA rules this lab depends on.
+> - **Time:** ~90 min.
+
 Build a console app. Use the `Calculator` object from Module 1 (in-proc, `ThreadingModel = Apartment` so COM enforces STA rules).
 
 ```cpp
@@ -706,6 +713,13 @@ int main()
 
 ## 3.11 LAB 3.2 — Build a deadlock, then diagnose it in WinDbg
 
+> **Requirements**
+> - **Tools:** **WinDbg** (Microsoft Store or the SDK's *Debugging Tools for Windows*) with symbols configured — set `_NT_SYMBOL_PATH=srv*C:\Symbols*https://msdl.microsoft.com/download/symbols` **before** launching, or `~*kb` will show no `combase` frames and the lab teaches you nothing. ATL for `CComPtr`.
+> - **Elevation:** not required to debug a process you launched yourself.
+> - **Bitness:** x64 — and the debugger must match the target.
+> - **Depends on:** Lab 3.1 (the registered `Calculator` and the GIT plumbing).
+> - **Time:** ~2 h.
+
 This lab is the single best preparation for real hang tickets.
 
 ```cpp
@@ -787,6 +801,13 @@ lmvm combase                    ; confirm symbols are loaded
 ---
 
 ## 3.12 LAB 3.3 — The ThreadingModel matrix
+
+> **Requirements**
+> - **Tools:** Visual Studio C++; `regsvr32`; **five fresh GUIDs** (`New-Guid` in PowerShell, or `guidgen.exe`).
+> - **Elevation:** required — five CLSID registrations.
+> - **Bitness:** x64.
+> - **Depends on:** the Module 2 in-proc server, with `DllGetClassObject` extended to accept all five CLSIDs and return the same factory.
+> - **Time:** ~2 h.
 
 **Do this lab.** It converts §3.3's table from something you read into something you know.
 

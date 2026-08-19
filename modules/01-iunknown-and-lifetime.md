@@ -574,6 +574,13 @@ One more you'll meet in the lab: `__declspec(novtable)` on an interface declarat
 
 ## 1.6 LAB 1.1 — Implement `IUnknown` by hand
 
+> **Requirements**
+> - **Tools:** Visual Studio with *Desktop development with C++*. Nothing else.
+> - **Elevation:** not required — no registry, no registration.
+> - **Bitness:** x64.
+> - **Depends on:** nothing. This is the first lab.
+> - **Time:** ~2 h.
+
 **No ATL. No WRL. No smart pointers.** You need to feel the machinery once.
 
 Create a Visual Studio **Console App (C++)** named `Lab01_Unknown`.
@@ -823,6 +830,13 @@ int main()
 
 ## 1.7 LAB 1.2 — Smart pointers
 
+> **Requirements**
+> - **Tools:** Visual Studio C++ plus the optional component **C++ ATL for latest build tools** (for `CComPtr`). WRL (`wrl/client.h`) ships with the Windows SDK — no extra install.
+> - **Elevation:** not required.
+> - **Bitness:** x64.
+> - **Depends on:** Lab 1.1 — you reuse `Calculator.h` and the `Calculator` implementation.
+> - **Time:** ~1 h.
+
 Manual `Release` is error-prone the moment you have early returns or exceptions. Compare four styles.
 
 ### Style A — raw pointers with a single exit
@@ -1033,6 +1047,13 @@ In a dump, for the crash family: `!heap -p -a <ptr>` will often show the block a
 ---
 
 ## 1.10 LAB 1.3 — Leak hunt (support drill)
+
+> **Requirements**
+> - **Tools:** WinDbg with the Microsoft symbol server configured (`_NT_SYMBOL_PATH=srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`); **Application Verifier** (Windows SDK, *Debugging Tools for Windows*); a colleague or a coin flip to inject the bug for you.
+> - **Elevation:** required — Application Verifier writes machine-wide image-execution options.
+> - **Bitness:** x64. Build **Release with symbols** (`/Zi` and linker `/DEBUG`).
+> - **Depends on:** Lab 1.1.
+> - **Time:** ~45 min, timed. Stop the clock and read the answer rather than running over.
 
 Do this as a timed exercise. It simulates a real ticket.
 

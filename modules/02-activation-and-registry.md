@@ -495,6 +495,13 @@ int wmain()
 
 ## 2.6 LAB 2.1 — Build, register, activate, and watch it happen
 
+> **Requirements**
+> - **Tools:** Visual Studio C++; `regsvr32`; **Process Monitor** (Sysinternals).
+> - **Elevation:** **required.** `regsvr32` writes to `HKLM\Software\Classes`, and ProcMon needs admin to load its driver. The per-user variant at the end of the lab deliberately runs *without* elevation.
+> - **Bitness:** x64 DLL and x64 client. Keep them matched — mismatching them is Lab 2.2.
+> - **Depends on:** the `Calc.dll` and `CalcClient.exe` sources from §2.5.
+> - **Time:** ~90 min.
+
 1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
 2. Register from an **elevated** prompt (HKCR writes need admin):
    ```powershell
@@ -523,6 +530,14 @@ This experiment is worth an hour; it explains a whole family of tickets.
 ---
 
 ## 2.7 LAB 2.2 — Bitness
+
+> **Requirements**
+> - **Tools:** Visual Studio with both **x86 and x64** configurations; both copies of `regsvr32` (`System32` = 64-bit, `SysWOW64` = 32-bit); Process Explorer.
+> - **Elevation:** required.
+> - **Bitness:** you need **all four** binaries — x86 and x64 of both DLL and client.
+> - **Depends on:** Lab 2.1.
+> - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in Lab 7.2.
+> - **Time:** ~60 min.
 
 1. Build `Calc.dll` as **x86**. Register with the 32-bit regsvr32:
    ```powershell
@@ -555,6 +570,13 @@ Now call with `CLSCTX_LOCAL_SERVER`. The object runs in `dllhost.exe`. Verify wi
 ---
 
 ## 2.8 LAB 2.3 — Registration-free (Reg-Free) COM
+
+> **Requirements**
+> - **Tools:** Visual Studio C++; **`mt.exe`** (Windows SDK) to embed the manifests, or the linker's *Manifest Tool* property page; **`sxstrace.exe`** to diagnose activation-context failures.
+> - **Elevation:** not required to *run* the lab — that is the entire point. You do need admin **once**, up front, to unregister the component.
+> - **Bitness:** the manifest's `processorArchitecture` must match the build exactly (`amd64` for x64, `x86` for 32-bit). A mismatch fails silently and falls back to the registry.
+> - **Depends on:** Lab 2.1 binaries, then **fully unregistered** (`regsvr32 /u`) — otherwise the registry satisfies the activation and you prove nothing.
+> - **Time:** ~90 min.
 
 Modern deployment avoids the registry entirely: no admin rights, no machine-wide state, side-by-side versions, and clean uninstall. Activation data comes from **manifests** read into the process's **activation context**.
 
@@ -695,6 +717,14 @@ certutil -error 0x8007007e
 ---
 
 ## 2.11 LAB 2.4 — Reproduce every failure deliberately (support drill)
+
+> **Requirements**
+> - **Tools:** `regsvr32`, Registry Editor, **Process Monitor**, Event Viewer, `icacls`.
+> - **Elevation:** required — you edit `HKCR` values and registry ACLs.
+> - **Bitness:** x86 and x64 builds (row 2).
+> - **Depends on:** Labs 2.1 and 2.2.
+> - **Caution:** run this on a **VM or dedicated test machine**. Rows 8 and 9 deny *your own account* Read access to a registry key and a file. Export the key and record the original ACL (`icacls <file> /save`) before you change anything, and restore it at the end.
+> - **Time:** ~2 h.
 
 This is the most valuable lab in the module. For each row below, **cause it on purpose** and record the ProcMon/Event Viewer signature in your notes.
 

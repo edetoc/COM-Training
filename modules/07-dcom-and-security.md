@@ -463,6 +463,13 @@ Event 10036, DistributedCOM:
 
 ## 7.9 LAB 7.1 — Build an out-of-proc EXE server
 
+> **Requirements**
+> - **Tools:** Visual Studio C++; Process Explorer; `dcomcnfg` for inspection.
+> - **Elevation:** required — `YourServer.exe -RegServer` writes `LocalServer32` and the AppID under `HKLM`.
+> - **Bitness:** x64.
+> - **Depends on:** **Lab 4.1's proxy/stub DLL, registered.** Out-of-proc is not optional about marshaling: with no proxy/stub and no TLB, `CoCreateInstance` returns `E_NOINTERFACE` and the lab stops at step one.
+> - **Time:** ~3 h.
+
 ```cpp
 #include <windows.h>
 #include <objbase.h>
@@ -572,6 +579,14 @@ HKCR\AppID\CalcSrv.exe
 
 ## 7.10 LAB 7.2 — DLL surrogate
 
+> **Requirements**
+> - **Tools:** PowerShell (registry edits), Process Explorer, `dcomcnfg`.
+> - **Elevation:** required — AppID and CLSID writes under `HKLM`.
+> - **Bitness:** 32-bit DLL with a 64-bit client for the bridge step.
+> - **Depends on:** Lab 2.2 (the surrogate attempt you left failing) **and** Lab 4.1's registered proxy/stub — that registration is exactly what makes it work this time.
+> - **Caution:** test machine or VM. Step 4 sets `RunAs = NT AUTHORITY\LocalService`, which changes the identity of every activation of that CLSID machine-wide. Export the AppID key first and remove the value when you are done.
+> - **Time:** ~90 min.
+
 Now finish Lab 2.2 properly.
 
 ```powershell
@@ -592,6 +607,14 @@ Set-ItemProperty "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Name "AppID" -Value $app
 ---
 
 ## 7.11 LAB 7.3 — Permissions and Event 10016
+
+> **Requirements**
+> - **Tools:** `dcomcnfg` (Component Services), Event Viewer / `Get-WinEvent`, and a test account for the `RunAs` steps.
+> - **Elevation:** required throughout.
+> - **Bitness:** `dcomcnfg` shows the **64-bit** DCOM config. For a 32-bit AppID run `mmc comexp.msc /32` — a component that "isn't in the list" is usually this.
+> - **Depends on:** an AppID **you own**, from Lab 7.1 or 7.2.
+> - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.8 tells you not to do.
+> - **Time:** ~2 h.
 
 1. In `dcomcnfg`, find your Calculator AppID → Properties → Security → **Launch and Activation Permissions** → Customize → Edit. **Remove your user account.**
 2. Run the client. Expect `E_ACCESSDENIED` (`0x80070005`).
@@ -619,7 +642,14 @@ E_ACCESSDENIED on activation
 
 ## 7.12 LAB 7.4 — Remote DCOM
 
-Requires two machines or two VMs on the same network/domain.
+> **Requirements**
+> - **Machines:** **two** machines or VMs on the same network or domain — there is no single-box substitute for this lab.
+> - **Tools:** firewall control on B (`New-NetFirewallRule`), `Test-NetConnection`, PortQry or `rpcdump`, Event Viewer on B, `dcomcnfg` on both.
+> - **Elevation:** required on **both** machines.
+> - **Bitness:** identical on both ends.
+> - **Depends on:** the Lab 7.1 EXE server, with the proxy/stub or type library registered on **A and B**. Registering it only on the server is the classic remote-DCOM failure and is worth reproducing on purpose.
+> - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
+> - **Time:** ~3 h.
 
 1. Register the server on machine B, and the **proxy/stub or type library on both A and B**. (Forgetting the client-side marshaling registration is a classic remote-DCOM failure.)
 2. From machine A, activate with `CoCreateInstanceEx` + `COSERVERINFO`.

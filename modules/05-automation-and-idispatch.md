@@ -649,6 +649,14 @@ ATL's `CComEnumOnSTL` / `IEnumOnSTLImpl` implement `IEnumVARIANT` over an STL co
 
 ## 5.9 LAB 5.1 — A dual interface driven from four languages
 
+> **Requirements**
+> - **Tools:** Visual Studio C++ (for `#import`); **Windows PowerShell 5.1 *and* PowerShell 7** — run the lab in both, their COM behaviour differs; `cscript.exe` for the VBScript client; the **.NET SDK** for the C# client.
+> - **VBScript:** on Windows 11 24H2 and later VBScript is an **optional feature on demand**, not installed by default. If `cscript test.vbs` fails, add it under *Settings → System → Optional features → VBSCRIPT*. It is deprecated — you learn it to support the customers still running it, not to write new code.
+> - **Elevation:** required, to register the server **and its type library** (`regsvr32` on a server with an embedded TLB, or `RegisterTypeLib`). Late binding by ProgID needs the CLSID; `#import` and early-bound C# need the TLB.
+> - **Bitness:** register x64 and use the 64-bit hosts — `%SystemRoot%\System32\cscript.exe` is 64-bit, `%SystemRoot%\SysWOW64\cscript.exe` is 32-bit. Picking the wrong one reproduces Lab 2.2's error, which is a useful accident.
+> - **Depends on:** a dual-interface `Calculator` with a registered type library — easiest via the ATL server in Lab 6.1, or the Module 4 IDL plus a hand-written `IDispatch`.
+> - **Time:** ~3 h.
+
 Build a `Calculator` with a dual interface, then call it from C++ (early and late bound), PowerShell, VBScript, and C#.
 
 ### C++ early bound (`#import`)
@@ -767,6 +775,13 @@ Then time 100,000 calls each. Early-bound C++ vs VBScript typically differs by *
 ---
 
 ## 5.10 LAB 5.2 — Events and the `Unadvise` leak
+
+> **Requirements**
+> - **Tools:** Visual Studio C++ with **ATL** (connection-point implementation); Windows PowerShell for `Register-ObjectEvent`.
+> - **Elevation:** required, to register the server and TLB.
+> - **Bitness:** x64, matching the PowerShell host you use.
+> - **Depends on:** the Lab 5.1 server, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
+> - **Time:** ~2 h.
 
 1. Add `_ICalculatorEvents` with `OnCalculated`, implement the connection point, and wire up the C++ sink from §5.7. Confirm the callback fires.
 2. Add the Module 1 ref-count tracing to both the source and the sink.
