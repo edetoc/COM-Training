@@ -1227,18 +1227,18 @@ Snippets 1 and 3 are the instructive ones here: nothing fails, nothing crashes, 
 
 ## 1.11 Checkpoint
 
-1. Why must `QueryInterface` `AddRef` before returning, even when it returns `this` for the same IID you already hold?
+1. You already hold an `ICalculator*`. You call `QueryInterface(IID_ICalculator, ...)` on it and get back a pointer with the **same address** you started with — no new object, no new pointer value. Why must the reference count still go up?
 2. An object implements `IFoo` and `IBar` via multiple inheritance. Why is `pFoo == pBar` false, and how do you *correctly* test whether they're the same object?
 3. What does `S_FALSE` mean? Name two APIs that return it, and describe the bug caused by testing `hr == S_OK`.
 4. `Release` does `delete this` and then `return n;`. Why is returning `n` safe but returning `m_cRef` a bug?
 5. You call `IEnumUnknown::Next(10, rgUnk, &fetched)` and it returns `S_FALSE` with `fetched == 4`. How many `Release` calls do you owe, and on what?
 6. Your process leaks 4 KB/second. `Release` is called correctly everywhere you can see. What's the next hypothesis and how do you test it?
-7. Decode `0x8007000E` and `0x80004002` from memory.
+7. Decode `0x8007000E` and `0x80004002` **by hand** — no lookup table, no `net helpmsg`, no search engine. For each one give: severity, facility, the 16-bit code, and the symbolic name.
 
 <details>
 <summary>Answers</summary>
 
-1. Because the *caller* now holds an independent reference in a new variable with its own lifetime, and will call `Release` on it. Without the `AddRef` the count would be one short and the object would die early. The rule is uniform precisely so callers never have to special-case anything.
+1. Because you now hold the object through **two variables**, and each one has its own lifetime and its own eventual `Release`. The count tracks *references*, not distinct addresses — so two variables means two, even when both store the same address. Skip the `AddRef` and the first `Release` destroys an object the second variable still points at. The rule is deliberately unconditional so a caller never has to ask "was that a *new* pointer or not?" before deciding whether it owes a `Release`.
 
 2. With multiple inheritance the object contains two vptrs at different offsets; `static_cast<IFoo*>(this)` and `static_cast<IBar*>(this)` yield different addresses. Correct test: `QI(IID_IUnknown)` on both and compare the results.
 
@@ -1250,7 +1250,9 @@ Snippets 1 and 3 are the instructive ones here: nothing fails, nothing crashes, 
 
 6. Hypothesis: a **reference cycle**, or a leak in a component you don't own (a callback sink, a proxy, an event subscription). Test: instrument `AddRef` with stack capture (`CaptureStackBackTrace` or WinDbg `bp ... "kb;gc"`), aggregate the stacks, and diff `AddRef` stacks against `Release` stacks. Also check for `Advise` without `Unadvise`.
 
-7. `0x8007000E` = FACILITY_WIN32 (0x7), Win32 code `0x0E` = 14 = `ERROR_OUTOFMEMORY` → `E_OUTOFMEMORY`. `0x80004002` = `E_NOINTERFACE`.
+7. **`0x8007000E`** — severity bit set (`8…` = failure); facility `0x007` = **FACILITY_WIN32**, which means the low word is a plain Win32 error; code `0x000E` = 14 = `ERROR_OUTOFMEMORY`. So: **`E_OUTOFMEMORY`**. The FACILITY_WIN32 trick is the one to internalize — any `0x8007xxxx` is just `HRESULT_FROM_WIN32(xxxx)`, so `0x80070005` is `ERROR_ACCESS_DENIED` and `0x80070002` is `ERROR_FILE_NOT_FOUND`.
+
+   **`0x80004002`** — severity bit set; facility `0x000` = **FACILITY_NULL** (a generic COM status, not a Win32 error); code `0x4002`. So: **`E_NOINTERFACE`**. The `0x8000400x` block is the core COM set — `E_NOTIMPL` (4001), `E_NOINTERFACE` (4002), `E_POINTER` (4003), `E_ABORT` (4004), `E_FAIL` (4005).
 
 </details>
 

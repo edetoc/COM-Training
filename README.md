@@ -152,7 +152,7 @@ Rewrite the client code three ways and compare: raw pointers with `goto Cleanup`
 
 **Checkpoint**
 
-- Why must `QueryInterface` `AddRef` before returning, even when returning `this`?
+- If `QueryInterface` hands back the very same pointer you called it on, why does the reference count still have to increase?
 - What does `S_FALSE` mean, and name two APIs that return it legitimately?
 - Draw the memory layout of an object implementing two interfaces via multiple inheritance.
 
