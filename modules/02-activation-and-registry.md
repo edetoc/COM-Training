@@ -31,7 +31,16 @@ CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_INPROC_SERVER,
                  IID_ICalculator, (void**)&pCalc);
 ```
 
-Windows must answer: *given only this 128-bit number, which file contains the code, and how do I run it?*
+Two GUIDs appear in that single call, and they answer completely different questions:
+
+| Argument | Name | Question it answers |
+|---|---|---|
+| `CLSID_Calculator` | **CLSID** — class ID | *Which component do I want created?* |
+| `IID_ICalculator` | **IID** — interface ID (Module 1) | *Which of its interfaces do I want back?* |
+
+Only the first one drives activation. The IID matters afterwards, once an object exists.
+
+So Windows must answer: *given the CLSID and nothing else — 128 bits, no path, no filename, no hint — which file on this machine holds that class's code, and how do I get it running?*
 
 The answer lives in the **registry** (or, for registration-free COM, in a **manifest**). That is the entire mechanism. Understanding the exact lookup path is what lets you diagnose activation failures in seconds instead of hours.
 
@@ -75,7 +84,10 @@ HKCR\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}
 
 - **`InprocServer32`** → a DLL loaded into the *client's* process.
 - **`LocalServer32`** → an EXE launched as a *separate* process.
-- Both present? The `CLSCTX` flags decide, in the order the flags imply.
+- Both present? The **third parameter of `CoCreateInstance`** decides — the `CLSCTX` flags (§2.4). They say which kinds of server the client is willing to accept, and COM tries them in its own fixed preference order: in-proc before local, local before remote.
+- **`ThreadingModel`** → which **apartment** the object is allowed to live in.
+
+> **New term — apartment.** An apartment is COM's thread-safety boundary: a group of threads that are permitted to call an object **directly**. A thread outside the object's apartment may not use a raw pointer to it at all — its calls have to be packaged up and handed across, which is **marshaling**. Two rules of thumb carry you through this module: an object is only ever in one apartment, and "different apartment" costs you the same kind of boundary crossing as "different process." Module 3 is devoted to this and `ThreadingModel` is its central knob — set it to `"Both"` for now.
 
 ### The ProgID keys — the human-readable alias
 
@@ -106,7 +118,7 @@ HKCR\Interface\{IID}
             (Default)  = "5"
 ```
 
-> **Support fact #2:** this key is only consulted when a call must **cross an apartment or process boundary**. That's why the classic bug is "works in-process, `E_NOINTERFACE` out-of-process." Module 4 covers it.
+> **Support fact #2:** this key is only consulted when a call must **cross a boundary** — between apartments, between processes, or between machines. A plain in-proc call inside one apartment never touches it, which is why the classic bug is "works in-process, `E_NOINTERFACE` out-of-process": the registration was always missing, but nothing needed it until something crossed a boundary. Module 4 covers it.
 
 ### The AppID key — process-wide settings for out-of-proc servers
 
@@ -122,7 +134,17 @@ HKCR\AppID\{APPID}
 
 Module 7 covers these. For now, note that AppID is *per-process*, while CLSID is *per-class*.
 
-### The TypeLib key
+### The TypeLib key — the machine-readable description of the interfaces
+
+A **type library** ("typelib") is a *compiled, binary description* of a component: its coclasses, interfaces, methods, parameter types, and enums. It is the same information a C++ header or an IDL file carries, but in a form **any language can read at runtime** rather than only a C++ compiler at build time.
+
+It is usually **embedded as a resource inside the DLL or EXE itself** — which is why the path below points at `Calc.dll` rather than a separate file — though it can also ship as a standalone `.tlb`.
+
+Who reads it:
+
+- **Scripting and late binding** — PowerShell, VBScript, VBA, C# `dynamic`. This is how `$calc.Add(2,3)` resolves a method name to something callable (Module 5).
+- **`#import` in C++** and `tlbimp`/COM references in .NET, to generate wrappers at build time (Module 6).
+- **COM itself**, for *typelib marshaling* — the `{00020424-…}` value in the `Interface` key above means "work out how to marshal this from the type library" instead of using a hand-built proxy/stub (Module 4).
 
 ```
 HKCR\TypeLib\{LIBID}\1.0
@@ -131,6 +153,11 @@ HKCR\TypeLib\{LIBID}\1.0
     │       (Default) = "C:\Components\Calc.dll"    <- or a .tlb path
     └── FLAGS, HELPDIR
 ```
+
+Two details that generate tickets:
+
+- **Type libraries are versioned in the registry** (`\1.0`), unlike CLSIDs. A client built against 1.0 will not find 2.0.
+- **`win32` vs `win64` subkeys** — the same bitness split as everything else in this module. A missing, unregistered, or wrong-bitness typelib gives you `0x80029C4A TYPE_E_CANTLOADLIBRARY`, and the symptom is usually "the script can't find the method" rather than an activation failure, because the object itself creates fine.
 
 ---
 
@@ -190,6 +217,8 @@ Two calls are happening. This matters: if you create many objects of the same cl
 
 ### `CLSCTX` flags
 
+This is the **third parameter** of `CoCreateInstance` (and of `CoGetClassObject`) — the `CLSCTX_INPROC_SERVER` in the very first example of this module. It is a **bitmask of the server kinds you will accept**, not a single choice:
+
 | Flag | Meaning |
 |---|---|
 | `CLSCTX_INPROC_SERVER` | DLL in my process |
@@ -200,6 +229,20 @@ Two calls are happening. This matters: if you create many objects of the same cl
 | `CLSCTX_ACTIVATE_32_BIT_SERVER` / `_64_BIT_SERVER` | Force bitness (only meaningful for LocalServer) |
 | `CLSCTX_ENABLE_CLOAKING` | Use the thread token for activation |
 | `CLSCTX_NO_CUSTOM_MARSHAL` | Security hardening: refuse `IMarshal` |
+
+When you pass more than one, **COM picks the order, not you.** It prefers in-proc, then in-proc handler, then local, then remote — regardless of how you wrote the flags. So `CLSCTX_ALL` does not mean "try what I listed first"; it means "any of these, cheapest first."
+
+#### What a "handler" actually is
+
+A **handler** is a *half object*: an in-process DLL that implements **part** of a class locally and forwards the rest to the real out-of-process server. Registered under `HKCR\CLSID\{...}\InprocHandler32`.
+
+Do not confuse it with a proxy. A **proxy** contains no logic — it packages every call and ships it to the server. A **handler** contains real code and cached data, so it can answer some calls *without the server running at all*.
+
+The canonical case is OLE embedding: an Excel chart inside a Word document. Word must **draw** that chart every time the document opens, and launching Excel to do it would be absurd. So the handler loads into Word and serves `IViewObject2` / `IDataObject` / `IPersistStorage` from the **presentation cache** saved inside the document. Only when you double-click to edit does it launch the real server and delegate.
+
+In practice `InprocHandler32` is almost always `ole32.dll` — the **default handler**, which provides that cache-and-draw behaviour generically. A *custom* handler is a DLL that aggregates the default handler via `OleCreateDefaultHandler` and overrides only the interfaces it cares about.
+
+> **Support angle:** this is legacy OLE compound-document territory, plus some shell extensions — you will rarely write one. But it explains a confusing signature: an object that renders and answers queries while its server process is nowhere in Task Manager. That's the handler serving cached state, not a ghost.
 
 > **Support fact #3:** `CLSCTX_ALL` is convenient and dangerous. If the in-proc registration is broken but a LocalServer32 exists, you'll silently get an out-of-proc object with different threading, different security, and different performance. When diagnosing, **always** re-test with the specific flag you expect.
 
@@ -226,6 +269,62 @@ STDAPI DllUnregisterServer(void);
 
 ### 2.5.1 `IClassFactory`
 
+**Why a factory at all?** Because your DLL cannot simply export `CreateCalculator()`. The client has never heard of your DLL: it has no header for it, no import library, it never links against it, and it may not even be written in C++. All it holds is a CLSID and the `CoCreateInstance` API.
+
+So COM needs **one entry point that every COM DLL has, with a fixed name and a fixed signature** — that is `DllGetClassObject`. Given a CLSID, it returns a **class object**: a small, long-lived COM object that represents *the class itself* and knows how to stamp out instances of it. `IClassFactory` is the interface that class object almost always implements — hence the everyday name **class factory**.
+
+```
+   one CLSID  ──►  one class object (the factory)  ──►  many instances
+```
+
+**What lives where.** Note that for an *in-proc* server the DLL is loaded into the client's own process — so "sides" here means **who owns which code**, not two separate processes:
+
+| | **Client code** | **`Calc.dll` — the code you write** |
+|---|---|---|
+| Starts with | two GUIDs: `CLSID_Calculator` and `IID_ICalculator` | nothing; it sits on disk until COM loads it |
+| Must provide | nothing but calls to COM APIs | `DllGetClassObject` — the one fixed export |
+| Ends up holding | an `ICalculator*` (and an `IClassFactory*` briefly) | the `CalculatorFactory`, and every `Calculator` instance |
+| Never has | your headers, your `.lib`, your class names | any idea who called it, or in what language |
+
+**The exchange**, with `CoCreateInstance` expanded into the calls it actually makes:
+
+```
+   CLIENT                           ║  Calc.dll  —  the code you write
+   ═════════════════════════════════╬════════════════════════════════════════
+                                    ║
+   CoCreateInstance(CLSID, ...)     ║
+        │                           ║
+        │  COM: read the registry,  ║
+        │       then LoadLibrary    ║
+        │                           ║
+        │──1────────────────────────╫─►  DllGetClassObject(CLSID, IID_IClassFactory)
+        │                           ║              │  returns the singleton
+        │                           ║              ▼
+        │◄─2── IClassFactory* ──────╫───  [ CalculatorFactory ]
+        │                           ║              │
+        │──3── CreateInstance() ────╫──────────────┤  creates a new object
+        │                           ║              ▼
+        │◄─4── ICalculator* ────────╫───  [ Calculator instance ]
+        │                           ║
+        │──5── Release() factory ───╫─►  (factory gone; the instance lives on)
+        │                           ║
+   pCalc->Add(40, 2, &r) ───────────╫─►  Calculator::Add() executes here
+                                    ║
+```
+
+Steps 1, 2 and 5 are exactly what `CoCreateInstance` hides from you. Call `CoGetClassObject` yourself instead and you keep the factory alive, so step 3 can be repeated as often as you like — which is the entire reason the factory is a separate object.
+
+That extra hop buys four things:
+
+| | |
+|---|---|
+| **Language independence** | The client calls a documented COM interface, never a named function inside your binary. |
+| **Batch creation** | `CoGetClassObject` once, then `CreateInstance` N times — one registry lookup and one DLL load instead of N (§2.4). |
+| **Server lifetime control** | `LockServer(TRUE)` pins the server in memory between creations, so it isn't unloaded and reloaded each time. |
+| **Uniformity across server types** | An in-proc server hands its factory out through `DllGetClassObject`; an EXE server registers the same factory with `CoRegisterClassObject` at startup (Module 7). Same interface, entirely different plumbing, identical client code. |
+
+Note what `CreateInstance` does **not** take: constructor arguments. COM objects are always created empty and initialized afterwards through an interface — which is exactly why `IPersistFile`, `IInitializeWithStream` and friends exist.
+
 ```cpp
 struct IClassFactory : public IUnknown
 {
@@ -241,36 +340,66 @@ struct IClassFactory : public IUnknown
 
 You'll write `if (pUnkOuter) return CLASS_E_NOAGGREGATION;` in a moment, so here's what you're declining.
 
-COM has no implementation inheritance — you can't subclass someone else's coclass. To reuse a component there are two options:
+**The situation.** Suppose someone wants to ship a `SecureCalculator`: the same arithmetic your `Calculator` already does, plus one extra interface of its own, `IAuditLog`. COM has **no implementation inheritance** — you cannot subclass another vendor's coclass, because all you were given is a GUID and a vtable. So there are exactly two ways to reuse the component, and both involve the outer object creating a private instance of the inner one.
 
-**Containment (delegation)** — the outer object holds the inner one privately and forwards calls. Simple, always works, and the client never learns the inner object exists.
+**Option 1 — containment (delegation).** The outer object re-implements every method by forwarding:
 
 ```cpp
-STDMETHODIMP COuter::DoThing() { return m_pInner->DoThing(); }   // one forwarding stub per method
+STDMETHODIMP CSecureCalculator::Add(long a, long b, long* r)
+{
+    return m_pInner->Add(a, b, r);       // one forwarding stub per method, forever
+}
 ```
 
-**Aggregation** — the outer object exposes the inner object's interfaces *directly* to the client, with no forwarding code at all. `QueryInterface` on the outer hands back the inner's actual pointer.
+Simple, always legal, and the client never learns the inner object exists. The cost is a stub per method plus an indirection per call — for methods you are not changing in any way.
 
-Aggregation exists because containment costs a forwarding stub per method, and an extra indirection per call, for interfaces you're passing through unchanged.
+**Option 2 — aggregation.** The outer object writes **no forwarding code at all**. When the client asks `SecureCalculator` for `ICalculator`, it hands back a pointer that physically belongs to the **inner** object. Calls go straight there, at full speed.
 
-The difficulty is Module 1's Rule 1: **every interface of a COM object must return the same `IUnknown`.** If the outer simply handed out the inner's pointer, the client could `QI(IID_IUnknown)` on it and get the *inner's* identity — two different answers from one logical object, and the object's identity and reference count would split in two.
+**The catch: the client must not be able to tell.** Either way the client believes it is holding *one* object that happens to support both `ICalculator` and `IAuditLog`:
+
+```
+                what the client believes            what is really there
+                ------------------------            --------------------
+                  ┌──────────────┐                  ┌─ OUTER ──────────┐
+   pAudit ──────► │              │                  │ IAuditLog        │
+                  │   ONE object │                  │                  │
+   pCalc  ──────► │              │                  │  ┌─ INNER ─────┐ │
+                  └──────────────┘                  │  │ ICalculator │ │
+                                                    │  └─────────────┘ │
+                                                    └──────────────────┘
+```
+
+And that is where the difficulty lies, because of Module 1's Rule 1: **every interface of one object must return the same `IUnknown`.** If the outer naively handed out the inner's pointer, the client could call `QI(IID_IUnknown)` on it and get the *inner's* identity — two different answers from what is supposed to be one object, with its reference count split across both halves.
 
 The fix is that an aggregatable object implements **two** `IUnknown`s:
 
 | | Purpose |
 |---|---|
 | **Non-delegating `IUnknown`** | The inner object's real one. Only the *outer* object uses it, to control the inner's lifetime. |
-| **Delegating `IUnknown`** | What the inner object exposes on all its *other* interfaces. Every call forwards to `pUnkOuter`. |
+| **Delegating `IUnknown`** | What the inner exposes on all its *other* interfaces. Every call forwards to `pUnkOuter`. |
 
-So when a client calls `QueryInterface` or `Release` on an interface it got from the aggregate, the call lands on the **outer** object — one identity, one reference count, Rule 1 preserved.
+So when a client calls `QueryInterface`, `AddRef`, or `Release` on the `ICalculator` it got from the aggregate, the call lands on the **outer** object — one identity, one reference count, Rule 1 preserved.
 
 ```
-   Client ──► IFoo (physically implemented by the INNER object)
+   Client ──► ICalculator (physically implemented by the INNER object)
                  │
                  └─ its QI/AddRef/Release delegate to ──► OUTER object's IUnknown
 ```
 
-That's what `pUnkOuter` is: the outer object's `IUnknown`, passed in at creation so the inner knows who to delegate to. The contract has strict rules — when `pUnkOuter` is non-null the factory may **only** return `IID_IUnknown` (the non-delegating one), because handing back anything else would leak the inner identity before aggregation is wired up.
+**Where `pUnkOuter` comes from.** It is the outer object handing the inner a pointer to itself, at creation time:
+
+```cpp
+// inside CSecureCalculator's initialization:
+CoCreateInstance(CLSID_Calculator,
+                 static_cast<IUnknown*>(this),   // pUnkOuter - "I am your outer object"
+                 CLSCTX_INPROC_SERVER,
+                 IID_IUnknown,                   // MUST be IUnknown when aggregating
+                 (void**)&m_pInnerUnknown);
+```
+
+So `pUnkOuter` is one object saying to another: *"you are being aggregated — send all your `QueryInterface`/`AddRef`/`Release` traffic to me."* A **null** `pUnkOuter` — what every ordinary `CoCreateInstance` passes — means "you are standing alone, be your own identity."
+
+That also explains the odd `IID_IUnknown` restriction: while aggregating, the factory may return *only* the non-delegating `IUnknown`. Handing back `ICalculator` at this point would expose the inner's separate identity before the delegation is wired up, and Rule 1 would already be broken.
 
 **In practice:** aggregation is rare in new code. It's fiddly, easy to get wrong, and containment is nearly always fast enough. ATL supports it via `DECLARE_AGGREGATABLE` / `CComAggObject` (Module 6) if you need it. **Returning `CLASS_E_NOAGGREGATION` is a perfectly respectable, and by far the most common, answer.**
 
