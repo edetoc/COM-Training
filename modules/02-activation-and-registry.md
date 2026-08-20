@@ -87,7 +87,7 @@ HKCR\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}
 - Both present? The **third parameter of `CoCreateInstance`** decides — the `CLSCTX` flags (§2.4). They say which kinds of server the client is willing to accept, and COM tries them in its own fixed preference order: in-proc before local, local before remote.
 - **`ThreadingModel`** → which **apartment** the object is allowed to live in.
 
-> **New term — apartment.** An apartment is COM's thread-safety boundary: a group of threads that are permitted to call an object **directly**. A thread outside the object's apartment may not use a raw pointer to it at all — its calls have to be packaged up and handed across, which is **marshaling**. Two rules of thumb carry you through this module: an object is only ever in one apartment, and "different apartment" costs you the same kind of boundary crossing as "different process." Module 3 is devoted to this and `ThreadingModel` is its central knob — set it to `"Both"` for now.
+> **An apartment** is COM's thread-safety boundary: a group of threads that are permitted to call an object **directly**. A thread outside the object's apartment may not use a raw pointer to it at all — its calls have to be packaged up and handed across, which is **marshaling**. Two rules of thumb carry you through this module: an object is only ever in one apartment, and "different apartment" costs you the same kind of boundary crossing as "different process." Module 3 is devoted to this and `ThreadingModel` is its central knob — set it to `"Both"` for now.
 
 ### The ProgID keys — the human-readable alias
 

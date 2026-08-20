@@ -28,6 +28,41 @@ Modules 1 and 2 assumed one thread. Reality has many. This module explains COM's
 
 COM objects come from arbitrary vendors. Some are thread-safe; most, historically, were not. A client has no way to know.
 
+> An object is **thread-safe** if several threads can use it **at the same time**, with no coordination between the callers, and it still behaves correctly. To manage that, the object has to protect its own internal state — with a lock, or with interlocked operations like the `InterlockedIncrement` you used on `m_cRef` in Module 1.
+>
+> "Not thread-safe" does **not** mean broken. It means *"I am correct only if one thread uses me at a time."* Most 1990s components were written that way deliberately: locking costs time on every call, and single-threaded was the normal case.
+>
+> Here is the part that matters for this module: **thread-safety is a property of the implementation, not of the interface.** Two objects can expose a byte-identical vtable, one safe and one not. No header, GUID, or type library records the difference.
+
+Consider the simplest possible unsafe object — a counter incremented with `m_value++`.
+
+**There is only one object.** Both threads hold a pointer to the *same* instance, so there is exactly one `m_value`, at one address in memory. What each thread owns privately is a **CPU register**, because `m_value++` is not one indivisible action — it is three:
+
+```cpp
+reg     = m_value;      // 1. read the field into this thread's register
+reg     = reg + 1;      // 2. add one, in the register
+m_value = reg;          // 3. write the register back to the field
+```
+
+Both threads run those three steps against that one shared field. The three right-hand columns below are the three storage locations involved — **two private registers and one shared field** — showing what each holds after every step:
+
+```
+  time │ what happens                     │ A's reg │ B's reg │ m_value
+  ─────┼──────────────────────────────────┼─────────┼─────────┼─────────
+    1  │ A: reg = m_value                 │    5    │    -    │    5
+    2  │ B: reg = m_value                 │    5    │    5    │    5
+    3  │ A: reg = reg + 1                 │    6    │    5    │    5
+    4  │ B: reg = reg + 1                 │    6    │    6    │    5
+    5  │ A: m_value = reg                 │    6    │    6    │    6
+    6  │ B: m_value = reg                 │    6    │    6    │    6   ← should be 7
+```
+
+Look at **time 2**: thread B reads `m_value` and gets **5**, because thread A has read it but not yet written anything back. From that moment both threads are working from the same starting value. Each adds one, each arrives at 6, and each stores 6. Two increments were executed, but the shared field only advanced by one. **The correct answer was 7.**
+
+Nothing crashes and no error is returned. The object is simply, quietly wrong. `InterlockedIncrement` fixes exactly this, by making all three steps a single indivisible operation that no other thread can interleave with.
+
+Now do it to a **reference count** and you get Module 1's two failure modes directly: a lost `AddRef` leaves the count too low, so `delete this` runs while someone is still holding the object — a use-after-free. A lost `Release` leaves it too high, and the object never dies — a leak.
+
 Two bad options:
 
 1. **Assume everything is thread-safe.** Every legacy single-threaded component corrupts instantly.
@@ -52,19 +87,97 @@ CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 ```
 
 - **Exactly one thread** lives in the apartment. A process may have many STAs, each with one thread.
+- **Any number of objects** may live in that one STA. An apartment is a *scope*, not a wrapper around a single object — the thread holds ordinary raw pointers to all of them and calls them directly, with no proxies and no marshaling, because they are all on its side of the boundary.
 - Objects in an STA are **only ever called on that one thread**.
 - Therefore the object needs **no locking at all** for its own state.
-- Calls arriving from other apartments are **serialized through a hidden window**. COM creates a message-only window (class `OleMainThreadWndClass`) for each STA thread and posts/sends messages to it.
-- **Consequence:** the STA thread *must pump messages*, or incoming calls never get delivered.
+- Because they share the single thread, those objects also **serialize against one another**: a slow method on one object delays every call to every other object in the same STA, related or not.
 
-The hidden window is the whole mechanism. You can see it:
+#### How a call from another apartment gets in
 
-```powershell
-# From a running STA process, in WinDbg:
-#   !handle / spy++ will show windows of class OleMainThreadWndClass
+**The problem.** An STA object may only ever be touched by the apartment's one thread. But a caller may be on some *other* thread — and if that thread invoked the method directly, it would break the exact guarantee the apartment exists to provide.
+
+So the call has to **change threads** on the way in:
+
+1. the calling thread stops and waits;
+2. the **STA's own thread** runs the method;
+3. the return value travels back, and the calling thread carries on.
+
+Everything else in this section exists to make step 2 happen.
+
+Windows already had a mechanism for handing work to another thread — the one the UI has used since 1985 — and COM reuses it wholesale: **the thread message queue**.
+
+> Every Win32 thread can own a **message queue**: an inbox that **other** threads are allowed to drop items into, and that **the owning thread** empties whenever it chooses. It is the standard Windows way to make one thread perform work on behalf of another — which is precisely the shape of the problem above.
+
+Reusing the queue drags in two practical details, and these are the two things people then confuse *with* the queue:
+
+1. **You need an address to send to.** A Windows message is addressed to a **window handle**, not to a thread. So when a thread enters an STA, COM creates a window for it: hidden, message-only, class `OleMainThreadWndClass`. Its entire job is to be a valid destination whose owning thread happens to be the STA thread.
+2. **A queue is only an inbox.** Something must take items out of it and act on them. That is the **message pump** — `GetMessage` + `DispatchMessage` in a loop — and it is **your** code, not COM's. This is the origin of the rule that an STA thread *must pump*.
+
+So there are three pieces, not one:
+
+| Piece | Belongs to | Role |
+|---|---|---|
+| **Message queue** | the **thread** | the *inbox*. Messages sit here until someone collects them. |
+| **Hidden window** (`OleMainThreadWndClass`) | the **apartment** | the *address*. Callers need an `HWND` to send to; this is it. |
+| **Message pump** (`GetMessage` + `DispatchMessage`) | **your code** | the *engine*. Takes messages out of the queue and hands them to the target window's procedure. |
+
+**The window is not the queue.** The window is an address that Windows resolves to a queue — specifically, the queue of the thread that created that window. Sending to the window is simply *how you get a message into that particular thread's inbox*.
+
+End to end, a cross-apartment call makes a **round trip**:
+
+```
+   CALLER (another apartment)              ║  STA THREAD
+   ════════════════════════════════════════╬══════════════════════════════════
+                                           ║
+   pCalc->Add(2, 3, &r)                    ║
+     on a proxy                            ║
+        │                                  ║
+        │ 1. proxy marshals 2 and 3        ║
+        ▼                                  ║
+   RPC channel ─ 2. send to hidden window ─╫───►  OleMainThreadWndClass
+        │                                  ║      (the STA's hidden HWND)
+        │                                  ║      │
+        │                                  ║      │  Windows routes it to the
+        │                                  ║      │  queue of the thread that
+        │                                  ║      │  owns that window
+        │                                  ║      ▼
+        │                                  ║      message queue
+        │  the caller's thread now         ║      │
+        │  BLOCKS here, waiting            ║      │  3. GetMessage +
+        │  for a reply                     ║      │     DispatchMessage
+        │                                  ║      │
+        │                                  ║      │  No pump? It stops
+        │                                  ║      │  here. Forever.
+        │                                  ║      ▼
+        │                                  ║      the window procedure runs
+        │                                  ║      │
+        │                                  ║      │  4. the stub calls
+        │                                  ║      ▼     the real method
+        │                                  ║      Calculator::Add(2, 3, &rStub)
+        │                                  ║      │     rStub = 5
+        │                                  ║      │
+        │ ◄─── 5. reply: HRESULT + [out] ──╫──────┘
+        ▼                                  ║
+   6. proxy unmarshals, writes 5 into      ║
+      the caller's own r, returns S_OK     ║
+                                           ║
 ```
 
-Because delivery rides on the message queue, an STA thread that blocks in `WaitForSingleObject` is a **stopped mail truck**: calls queue up and nothing is delivered. That is the origin of most COM hangs.
+Three things about the return leg (step 5) that are easy to get wrong:
+
+- **The reply does not travel through a message queue.** It comes back on the **same RPC channel** the request went out on. The caller is blocked *inside that channel* — which is why a hung caller shows `combase!...SendReceive` on its stack, not a wait on a window.
+- **There are two `r` variables.** The server never writes to the caller's memory. The stub passes its *own* local (`rStub` above), and step 6 copies the value across. This is precisely why `[out]` must be declared in IDL: COM can only copy back what it was told about (Module 4).
+- **If the caller is itself an STA, it pumps messages while blocked**, so calls can still arrive *into* it while it waits. That is where reentrancy comes from (§3.6). The reply itself still arrives on the channel, not the queue.
+
+So "the STA isn't pumping" and "the call was never delivered" are two descriptions of the same failure: the message reached the inbox, and nobody ever collected it.
+
+You can see that window yourself: `spy++`, or `!handle` in WinDbg, shows a window of class `OleMainThreadWndClass` on every STA thread in the process.
+
+> **The console-app trap.** Creating a window also creates the thread's queue — so a console STA ends up with a perfectly working inbox and no message loop anywhere to empty it, and nothing warns you. An **MTA** thread gets neither: no hidden window, no queue from COM, and no obligation to pump.
+
+**Not every call goes through the queue.** A call from *inside* the same apartment is an ordinary vtable call — direct, no marshaling, no message, no proxy, and the same cost as any C++ virtual call. The queue is only involved when a call **crosses an apartment boundary**, which is the whole reason §3.5's cardinal rule exists.
+
+An STA thread that blocks in `WaitForSingleObject` is therefore a **stopped mail truck**: calls pile up in the inbox and nothing is delivered. That is the origin of most COM hangs.
 
 #### The "main STA"
 
@@ -107,6 +220,7 @@ ThreadingModel = "Neutral"
 | | STA | MTA | NA |
 |---|---|---|---|
 | Threads per apartment | exactly 1 | many | 0 (borrows caller's) |
+| **Objects per apartment** | **many** | **many** | **many** |
 | Instances per process | many | 1 | 1 |
 | Object must be thread-safe | **no** | **yes** | **yes** |
 | Requires message pump | **yes** | no | no |
@@ -114,27 +228,70 @@ ThreadingModel = "Neutral"
 | Reentrancy during outbound calls | **yes** | no | no |
 | Typical use | UI, legacy components | servers, worker pools | high-perf stateless |
 
+### Which one should *your thread* join?
+
+This is a decision you make per thread, in the `CoInitializeEx` call. A single process routinely does both: an STA UI thread plus a pool of MTA workers.
+
+**Join the MTA when:**
+
+- The thread has **no UI and no message loop** — a service, a daemon, a background worker, a request handler.
+- You want **real concurrency**: several threads calling the same object at once, rather than queued behind one another.
+- The thread needs to **block** on kernel objects (`WaitForSingleObject`, a semaphore, I/O). An MTA thread may block freely; an STA thread that blocks stops delivering calls.
+- You want to **avoid reentrancy**. An MTA call simply blocks until it returns; it does not dispatch other work in the middle of your method (§3.6). This alone removes an entire class of bug.
+- The objects you use are registered `Free`, `Both`, or `Neutral` — then no thread switch is needed and calls run at full vtable speed.
+
+**Join an STA when:**
+
+- **The thread owns windows.** UI has thread affinity; a thread with windows must be an STA. This is not negotiable.
+- You need components registered **`ThreadingModel = Apartment`** — which is most legacy, Office, and shell components. Call one of those from an MTA and COM creates a host STA for it, so *every single call* is marshaled across a thread switch. That is a common and easily-missed performance ticket.
+- You depend on APIs that require an STA anyway: shell dialogs and drag-drop, MAPI, most Office automation, WinForms and WPF.
+- Your own object is **not thread-safe** and you would rather have COM serialize calls than write the locking yourself.
+
+**The rule of thumb:** MTA is the better default for server-side and background work; STA is required for UI and for the large body of legacy components that assume it. If you can choose freely and none of the STA constraints apply, choose the MTA — it is faster and it cannot surprise you with reentrancy.
+
+> **In .NET:** thread-pool threads and `Task` continuations are **MTA**. WinForms/WPF entry points are marked `[STAThread]`, and `Thread.SetApartmentState` must be called before the thread starts. A great many "works in a console app, hangs in my service" reports are exactly this difference.
+
 ---
 
 ## 3.3 `ThreadingModel` — where an object actually lands
 
-This registry value on `InprocServer32` (Module 2) declares the object's contract. **It does not say where the object runs; it says where COM is allowed to put it.**
+This registry value on `InprocServer32` (Module 2) is the object's own declaration of what it can tolerate. **It does not say where the object runs; it says where COM is allowed to put it.**
 
-| `ThreadingModel` | Meaning | STA client creates it in… | MTA client creates it in… |
-|---|---|---|---|
-| *(absent)* | Legacy "single-threaded" | **The main STA** (first STA initialized in the process) | The main STA — **every call is marshaled** |
-| `Apartment` | Object is STA-only | The **caller's own STA** — direct calls, fast | A **host STA** created by COM — every call marshaled |
-| `Free` | Object is MTA-safe | The **MTA** — every call from the STA is marshaled | The caller's MTA — direct calls, fast |
-| `Both` | Object works either way | The **caller's own STA** — direct | The **MTA** — direct |
-| `Neutral` | Object is NA | The NA — direct call, no thread switch | The NA — direct call |
+### The one rule
 
-**Read that table twice.** It explains an enormous amount of real-world behaviour:
+> COM places the object in an apartment its declared model allows — **creating one if none suitable exists**. If that apartment is not the caller's, then every call between them is marshaled.
 
-- A component marked `Apartment` used from a thread pool (MTA) gets a **hidden host STA** created for it, and *every single call is a cross-apartment marshaled call with a thread switch*. This is the classic "why is my component 100× slower in the service than in the test app" case.
-- A component with **no** `ThreadingModel` value is worse still: everything funnels into the process's *main* STA, serializing all clients through one thread. This is why legacy components don't scale.
-- `Both` is what well-written components use: the object is thread-safe *and* willing to live in an STA, so COM never needs to marshal.
+Everything in this section follows from that single sentence. The tables below are just it, worked out.
 
-> **Support reflex:** for any "component is slow / serialized / deadlocks under load" ticket, read `ThreadingModel` first, then determine the client's apartment. That 2-value lookup solves a surprising fraction of cases.
+### What each value declares
+
+| Value | What the object is saying |
+|---|---|
+| *(absent)* | "I am not thread-safe, and I predate this setting existing." |
+| `Apartment` | "Call me on one thread only. COM, serialize for me." |
+| `Free` | "I am thread-safe. Put me in the MTA." |
+| `Both` | "I am thread-safe, and I'll live in whichever apartment my caller is in." |
+| `Neutral` | "I am thread-safe, and I never want a thread switch." |
+
+### Where it lands, and what that costs
+
+| Value | Called from an STA | Called from the MTA |
+|---|---|---|
+| *(absent)* | the process's **main STA** — direct *only* if you are that thread | the **main STA** — marshaled |
+| `Apartment` | the **caller's own STA** — direct | a **host STA** that COM creates — marshaled |
+| `Free` | the **MTA** — marshaled | the **caller's MTA** — direct |
+| `Both` | the **caller's own STA** — direct | the **MTA** — direct |
+| `Neutral` | the **NA** — direct | the **NA** — direct |
+
+Read one row aloud to check it has landed: *"`Free`, called from an STA — COM puts the object in the MTA, that is not where I am, so every call gets marshaled."*
+
+### The three rows that cause real tickets
+
+- **`Apartment`, called from the MTA.** COM creates a hidden host STA, and every single call becomes a marshaled call with a thread switch. This is the classic *"why is my component 100× slower in the service than in my test app"*.
+- **No value at all.** Worse: every such object in the process funnels into the *one* main STA and serializes there, however unrelated they are. This is why legacy components don't scale.
+- **`Both`.** What well-written components use — thread-safe, yet willing to live in an STA, so COM never has to marshal in either direction.
+
+> **Support reflex:** for any "slow / serialized / deadlocks under load" ticket, read `ThreadingModel` first, then work out the client's apartment. That two-value lookup resolves a surprising share of cases.
 
 ---
 
@@ -238,12 +395,18 @@ Use this in a DLL that needs the MTA to be available but has no business dictati
 ## 3.5 The cardinal rule: never pass a raw interface pointer across apartments
 
 ```cpp
+// On the main thread:
+//     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);       // main thread joins an STA
+//     CoCreateInstance(CLSID_Calculator, ..., (void**)&g_pCalc);
+// The object is registered ThreadingModel = Apartment, so it now lives
+// in THAT thread's STA and may only ever be called on THAT thread.
+
 // THIS IS A BUG. Always.
 ICalculator* g_pCalc = nullptr;
 
 DWORD WINAPI WorkerThread(LPVOID)
 {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // a DIFFERENT apartment
     long r;
     g_pCalc->Add(1, 2, &r);      // <-- raw pointer from another apartment
     CoUninitialize();
@@ -251,13 +414,72 @@ DWORD WINAPI WorkerThread(LPVOID)
 }
 ```
 
-What actually happens depends on the object, and **that is the problem**:
+### Why this fails
 
-- If the object is in an STA and you call it from the MTA, you bypass the serialization the object was promised. Its unsynchronized state gets corrupted — **silently, intermittently, under load only**.
-- If a proxy was involved, you may get `RPC_E_WRONG_THREAD` (`0x8001010E`) — the lucky case, because it's loud.
-- Frequently it *appears to work* in testing and fails in production. This is why the rule is absolute rather than conditional.
+`g_pCalc` is a **direct pointer to the object's vtable**. So `g_pCalc->Add(1, 2, &r)` is an ordinary C++ virtual call: load a function address out of the vtable, jump to it. **No COM code runs at all.**
 
-The pointer must be **marshaled**: converted into a form that can travel, then converted back into a proxy valid in the destination apartment.
+That is the entire problem, and it is worth stating precisely: COM is not being *tricked* here, COM is simply **never invoked**. Nothing checks the thread, because nothing is running that could check.
+
+Put that next to the round-trip diagram in §3.2. Every step in it — the proxy, the message, the window, the queue, the thread switch — happens only because a **proxy** stood between the caller and the object. Copy the raw pointer instead and all of it is skipped: `Calculator::Add` simply executes **on the worker thread**.
+
+#### What is broken
+
+`ThreadingModel = Apartment` is the object saying *"I am not thread-safe."* COM's half of that deal is *"then I will make sure only one thread ever calls you."*
+
+COM keeps its promise **using the proxy**. Go around the proxy and there is nothing left: the object has **no locks of its own**, because it was told it would never need any.
+
+#### What it costs you
+
+| Corrupted | Symptom |
+|---|---|
+| The object's fields | Wrong answers; bad data written to files or a database |
+| Its reference count (often plain `++`, not `InterlockedIncrement`) | Random `0xC0000005`, or a leak — Module 1's two failure modes |
+| Its internal lists and buffers | Access violations deep inside the component |
+| A window, or **thread-local storage**, it set up on the STA thread | Silently stops working — the other thread sees a different, empty slot |
+
+> **Thread-local storage (TLS)** is memory that is private to each thread: one variable name, a separate value per thread (`thread_local` in C++, `TlsAlloc`/`TlsGetValue` in Win32). Components use it to cache per-thread state. Arrive on a different thread and you read *that* thread's slot instead — usually empty, occasionally someone else's data.
+
+And the call still returns `S_OK`. Every time.
+
+### Why it is so hard to catch
+
+What happens next depends on something invisible at the call site — **what that pointer actually pointed at**:
+
+| What `g_pCalc` really held | Result |
+|---|---|
+| A **raw pointer** to the real object (in-proc server, same process) | Nothing detects anything. The method runs on the wrong thread and corrupts state **silently, intermittently, and only under load**. |
+| A **proxy** (the object was already in another apartment or process) | Proxies *do* enforce thread affinity — you get `RPC_E_WRONG_THREAD` (`0x8001010E`). This is the **lucky** case, because it is loud and immediate. |
+
+And in testing it will usually appear to work: a single-threaded test never puts two threads inside the object at once, so the corruption never materializes. It surfaces in production, under concurrency, as data corruption with no stack trace pointing anywhere near this line.
+
+**That is why the rule is absolute rather than conditional.** "It worked when I tried it" carries no information here.
+
+### The fix, in one sentence
+
+The pointer must be **marshaled**: converted into a form that can travel between apartments, then converted back into a **proxy** that is valid in the destination apartment.
+
+A proxy looks identical to the caller — same interface, same method names, same calling code. The only difference is what happens *inside* the call: instead of jumping straight into the object, it runs the round trip from §3.2. So the fix does not change how you use the pointer. It changes **how you obtain one on the other thread.**
+
+```cpp
+// WRONG                                    // RIGHT
+g_pCalc->Add(1, 2, &r);                     ICalculator* pLocal = /* marshal it here */;
+//  ^ a pointer that belongs                pLocal->Add(1, 2, &r);
+//    to another apartment                  pLocal->Release();
+//                                          //  ^ a proxy that belongs to THIS apartment
+```
+
+### Four ways to get that proxy — and which one you actually need
+
+Do not read all four with equal attention on a first pass:
+
+| | Approach | Use it when | On a first read |
+|---|---|---|---|
+| **A** | `CoMarshalInterThreadInterfaceInStream` | a one-shot handoff to one specific thread | skim — it is the primitive the others are built on |
+| **B** | **The Global Interface Table (GIT)** | a pointer used repeatedly, from many threads | **read properly** — the everyday answer in C++ |
+| **C** | Let the framework do it | you are in .NET or C++/WinRT | **read properly** — the everyday answer everywhere else |
+| **D** | Agility (FTM / `IAgileObject`) | you are *writing* the component | come back when you author one |
+
+> **If you take one thing from this section:** share the **GIT cookie**, never the pointer. In C++/WinRT share a `winrt::agile_ref`. In .NET the runtime already does it for you.
 
 ### Option A — `CoMarshalInterThreadInterfaceInStream`
 
@@ -265,20 +487,73 @@ For a one-shot handoff to a specific thread.
 
 > **`IStream`, briefly.** COM's standard byte-stream interface (`Read`, `Write`, `Seek`, `Commit`, …). Here it's just a transport: `CoMarshalInterThreadInterfaceInStream` serializes the marshaling data into an in-memory stream, and the destination apartment deserializes a proxy back out of it. You never read or write it yourself. It's a plain COM object, so you `Release` it like anything else — except that `CoGetInterfaceAndReleaseStream` does that for you.
 
-```cpp
-// --- Source apartment ---
-IStream* pStream = nullptr;
-HRESULT hr = CoMarshalInterThreadInterfaceInStream(
-    IID_ICalculator, pCalc, &pStream);
-// Hand pStream to the other thread (e.g. as the thread parameter).
+**What is actually in that stream?** Not the object, and not a copy of it. The call does two things: it creates a **stub** in the *source* apartment — the piece that will receive marshaled calls and invoke the real method — and it writes a small descriptor of that stub (an **OBJREF**: which apartment, which stub, which interface) into the stream. The object itself never moves.
 
-// --- Destination apartment (after its own CoInitializeEx) ---
-ICalculator* pCalcProxy = nullptr;
-hr = CoGetInterfaceAndReleaseStream(
-    pStream, IID_ICalculator, reinterpret_cast<void**>(&pCalcProxy));
-// pStream is consumed and released by the call, success or failure.
-// pCalcProxy is a PROXY valid ONLY in this apartment.
+```cpp
+DWORD WINAPI WorkerThread(LPVOID pv);
+
+// ─── main thread — the SOURCE apartment (an STA) ──────────────────────
+int main()
+{
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    ICalculator* pCalc = nullptr;
+    CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_INPROC_SERVER,
+                     IID_ICalculator, (void**)&pCalc);
+    // pCalc is valid ONLY on this thread.
+
+    // 1. Package it. Creates a stub here, and writes a descriptor of that
+    //    stub into a fresh in-memory stream.
+    IStream* pStream = nullptr;
+    HRESULT hr = CoMarshalInterThreadInterfaceInStream(IID_ICalculator, pCalc, &pStream);
+    if (FAILED(hr)) { /* ... */ }
+
+    // 2. The STREAM pointer is what may cross threads — never pCalc itself.
+    HANDLE hThread = CreateThread(nullptr, 0, WorkerThread, pStream, 0, nullptr);
+
+    // 3. This thread must keep pumping or the worker's calls never arrive (§3.2),
+    //    and must stay alive, because the object lives in THIS apartment.
+    ULONG index = 0;
+    CoWaitForMultipleHandles(COWAIT_DEFAULT, INFINITE, 1, &hThread, &index);
+
+    CloseHandle(hThread);
+    pCalc->Release();
+    CoUninitialize();
+    return 0;
+}
+
+// ─── worker thread — the DESTINATION apartment (the MTA) ──────────────
+DWORD WINAPI WorkerThread(LPVOID pv)
+{
+    IStream* pStream = static_cast<IStream*>(pv);
+
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);      // MUST happen first
+
+    // 4. Unpack. Builds a PROXY valid in THIS apartment, and releases the
+    //    stream for you — even on failure.
+    ICalculator* pProxy = nullptr;
+    HRESULT hr = CoGetInterfaceAndReleaseStream(pStream, IID_ICalculator, (void**)&pProxy);
+    if (FAILED(hr)) { CoUninitialize(); return 1; }
+
+    // 5. Looks like an ordinary call. Actually performs the §3.2 round trip:
+    //    marshal → main thread's queue → main thread runs Add → reply.
+    long r = 0;
+    pProxy->Add(1, 2, &r);        // r == 3, and Add() ran on the MAIN thread
+
+    pProxy->Release();
+    CoUninitialize();
+    return 0;
+}
 ```
+
+**Which thread may touch what:**
+
+| | Created on | Usable from |
+|---|---|---|
+| `pCalc` (the real pointer) | main thread | **main thread only** |
+| `pStream` | main thread | **either thread** — this is the entire point |
+| `pProxy` | worker thread | **worker thread only** |
+| `Calculator::Add` | — | always executes on the **main** thread |
 
 Critical details:
 
@@ -320,7 +595,7 @@ Rules:
 
 ### Option C — let the framework do it
 
-- **.NET**: RCWs are apartment-aware; the CLR marshals automatically. You mostly stop thinking about this — until you hit `InvalidCastException` on an interface with no marshaling support.
+- **.NET**: when managed code uses a COM object, the CLR wraps it in a **Runtime Callable Wrapper (RCW)** — an ordinary-looking .NET object that holds the real COM interface pointer, marshals your calls to it, and `Release`s it when collected. RCWs are apartment-aware, so handing one to another thread simply works: the CLR marshals for you. You mostly stop thinking about this — until you hit `InvalidCastException` on an interface with no marshaling support registered. (Module 6 covers RCWs, and their mirror image the CCW, in full.)
 - **C++/WinRT**: `winrt::agile_ref<T>` wraps a GIT registration with RAII.
 
 ```cpp
@@ -330,6 +605,8 @@ auto local = agile.get();                       // proxy for this apartment
 ```
 
 ### Option D — make marshaling unnecessary: agility
+
+> **Component authors only.** If you are a *client* — someone handed you a pointer and you need to use it on another thread — Options A–C are your entire toolkit, and you can skip ahead to §3.6 on a first read. Come back here when you write a component of your own, or when you need to understand why someone else's component behaves the way it does.
 
 Options A–C all *marshal*: they produce a proxy so the call can cross safely. There is a fourth approach — build an object that **needs no marshaling at all**, because it is genuinely safe to call from any apartment.
 
@@ -433,60 +710,136 @@ Note that A–C are things a **client** does to a pointer it was given. D is som
 
 This is the concept that separates people who "know COM" from people who can debug it.
 
-**When an STA thread makes an outbound COM call that crosses an apartment boundary, it does not simply block. It pumps messages while it waits.**
+### What reentrancy means here
 
-Why? Because if it blocked, and the server called back into it, you'd deadlock instantly. Pumping keeps the STA responsive so callbacks can be delivered.
+> **Reentrancy** is a single thread beginning a **second** COM call before the first one has returned — so two calls are live on that one thread at the same time, one nested inside the other.
 
-The consequence is severe:
+Be careful what that does *not* mean. It is **not** two threads running at once. An STA still has exactly one thread, and only one thing executes at any instant. The problem is that the two calls **interleave**: your first call is suspended part-way through, arbitrary other code runs on the same thread, and then your call resumes on top of whatever that code changed.
+
+### Why STAs have it and MTAs do not
+
+It comes straight out of the message pump from §3.2.
+
+**When an STA thread makes an outbound COM call that crosses an apartment boundary, it does not simply block. It pumps messages while it waits.** And pumping means dispatching whatever is sitting in the queue — including *incoming* COM calls.
+
+Why would it do something so dangerous? Because the alternative is worse. If it blocked, and the server called back into it, you would deadlock instantly: the callback needs the STA to pump, and the STA is busy waiting for the call that produced the callback. Pumping keeps the STA reachable.
+
+An MTA thread has no queue and no pump at all. When it makes an outbound call it blocks in the channel and dispatches nothing; incoming calls to MTA objects are delivered on *other* RPC worker threads instead.
+
+| | STA | MTA |
+|---|---|---|
+| While waiting on an outbound call | **pumps** — runs other work | **blocks** — runs nothing |
+| Can a second call begin on the same thread, mid-call? | **yes** | no |
+| Incoming calls arrive on | this same thread | other RPC threads |
+| So your hazard is | **reentrancy** — state changes under you | **concurrency** — two threads at once |
+| And your defence is | re-check state after every outbound call | locks |
+
+**Neither model is free.** The STA spares you from writing locks and charges you reentrancy instead. The MTA removes reentrancy and charges you thread-safety. That trade-off is the centre of this whole module.
+
+### Reentrancy in action — the user clicks Cancel
+
+Here is a Submit handler on a UI thread — so, an STA — and the Cancel button next to it. **There is nothing wrong with either of these.** No missing lock, no misuse of COM, no clever trick. Written in an ordinary single-threaded program they would both be correct:
 
 ```cpp
-void CMyObject::DoWork()
+void Order::Submit()                 // runs on the UI thread
 {
-    m_state = Busy;
-    m_pRemoteServer->LongOperation();   // <-- pumps messages here!
-                                        //     ANY incoming call can run NOW,
-                                        //     on THIS thread, RE-ENTERING this object.
-    assert(m_state == Busy);            // may fail: something else ran and changed it
+    m_pPayments->Charge(100);        // out-of-proc call: the STA pumps while it waits
+    m_submitted = true;              // record that it worked
+}
+
+void OrderDialog::OnCancel()         // the Cancel button, same UI thread
+{
+    DestroyWindow(m_hwnd);
+    m_pOrder->Release();             // the dialog held the last reference to the Order
+    m_pOrder = nullptr;
 }
 ```
 
-During `LongOperation()`, on the *same thread*:
+`Charge` talks to another process and takes a couple of seconds. While the user waits, they change their mind and click **Cancel**:
 
-- Another client's call into your object can execute.
-- `WM_PAINT`, `WM_TIMER`, and user input can be processed.
-- The user can click "Close" and your window can be destroyed **while you're inside `DoWork`**.
-- A second `DoWork` can start before the first finishes.
+```
+   ONE thread (the UI STA). Time runs downward.
 
-This is not a corner case; it is normal STA behaviour. It's why Office automation code sometimes behaves bizarrely, and why UI code that calls out-of-proc COM must be written defensively.
+   ┌─ Submit()  ................................. call #1
+   │    Charge(100) ──────►  out-of-proc; the STA PUMPS while it waits
+   │                             │
+   │                             │   the user clicks Cancel → WM_COMMAND lands
+   │                             │   in the queue → the pump dispatches it,
+   │                             │   on THIS thread, right now
+   │                             ▼
+   │   ┌─ OnCancel()  ........................... runs NESTED inside Submit()
+   │   │    DestroyWindow(m_hwnd)
+   │   │    m_pOrder->Release()  →  ref count hits 0  →  the Order is DELETED
+   │   └─ returns
+   │                             │
+   │    ◄────────────────────────┘   Charge finally returns
+   │    m_submitted = true       ←   writes into freed memory; `this` is gone
+   └─ returns
+```
 
-### Defensive patterns
+The object was destroyed **in the middle of its own method**, and the last line is a use-after-free — Module 1's crash family, produced without a second thread existing anywhere.
+
+**Nothing was introduced or planted here.** The defect is not inside `Submit` at all — it is that an STA runs *other work* in the middle of an outbound call. Move the identical function to an MTA thread, where the call simply blocks and no `OnCancel` can run on it, and the code is correct.
+
+That is the whole lesson of this section: **on an STA, every outbound cross-apartment call is a hole in your function through which arbitrary other code can run.** You cannot see the hole by reading the function.
+
+**In a debugger you recognize it instantly:**
+
+```
+   Order::OnCancel               <-- the nested call
+   DispatchMessage
+   ...the pump...
+   combase!CoWaitForMultipleHandles
+   Payments::Charge              <-- still inside Submit
+   Order::Submit                 <-- the original call
+   main
+```
+
+Your code, a message pump, and then **your code again, higher up the same stack**. That sandwich is the signature of reentrancy in every dump you will ever read.
+
+**And it is not only Cancel buttons.** While that outbound call is pumping, anything in the queue can run on this thread:
+
+- another client's call into your object;
+- `WM_PAINT`, `WM_TIMER`, and any user input;
+- the user closing the window your object depends on;
+- a second entry into the very method you are already inside.
+
+This is not a corner case; it is normal STA behaviour. It is why Office automation code sometimes behaves bizarrely, and why UI code that calls out-of-proc COM has to be written defensively.
+
+### Defending against reentrancy
+
+You cannot switch reentrancy off. An STA that stopped pumping would deadlock instead (§3.8), so the pump is not optional — which means **every STA method that makes an outbound call has to be written to survive being interrupted part-way through**.
+
+Four habits cover almost all of it:
 
 ```cpp
 void CMyObject::DoWork()
 {
-    if (m_inDoWork) return;              // 1. Reentrancy guard
+    if (m_inDoWork) return;              // 1. Reentrancy guard: refuse a second entry
     m_inDoWork = true;
     auto guard = wil::scope_exit([&]{ m_inDoWork = false; });
 
-    EnableWindow(m_hwnd, FALSE);         // 2. Disable UI that could re-enter
+    EnableWindow(m_hwnd, FALSE);         // 2. Disable the UI that could re-enter you
 
-    auto self = ComPtr<IUnknown>(this);  // 3. Keep yourself alive across the call;
-                                         //    a reentrant call could Release you to zero
+    auto self = ComPtr<IUnknown>(this);  // 3. Keep YOURSELF alive across the call
+                                         //    - this is the Cancel bug above
 
-    m_pRemoteServer->LongOperation();
+    m_pRemoteServer->LongOperation();    //    <-- the hole: anything may run here
 
-    if (!IsWindow(m_hwnd)) return;       // 4. Re-validate EVERYTHING after the call
-    m_state = ReadStateAgain();          //    Cached values may be stale.
+    if (!IsWindow(m_hwnd)) return;       // 4. Re-validate everything afterwards:
+    m_state = ReadStateAgain();          //    any cached value may now be stale
 }
 ```
 
-Point 3 deserves emphasis: **you can be destroyed during your own method call.** `AddRef`ing `this` for the duration of any call that might pump is standard practice in UI-adjacent COM code.
+Point 3 deserves emphasis: **you can be destroyed during your own method call.** `AddRef`ing `this` for the duration of any call that might pump is standard practice in UI-adjacent COM code — and it is precisely what would have saved `Order::Submit`.
+
+> **Why `IMessageFilter` gets its own section.** Everything above is defence you write *inside your own methods*: it assumes the reentrant call has already arrived and you must cope. `IMessageFilter` (§3.7) is the other lever — it lets you tell COM **which calls to dispatch at all** while you are busy, so some never arrive. Your code defending itself, versus COM policing the door. It is separate because that interface also does a second, unrelated job: deciding what happens when your *outbound* calls are rejected by a busy server.
 
 ---
 
 ## 3.7 `IMessageFilter` — controlling reentrancy
 
-`IMessageFilter` lets an STA decide what to do with incoming calls while it's busy, and what to do when its own calls are rejected. Register with `CoRegisterMessageFilter`.
+Where §3.6's habits protect your code *after* a reentrant call has arrived, `IMessageFilter` decides **whether it arrives at all**. It lets an STA say what to do with incoming calls while it is busy — and, separately, what to do when its own outbound calls are rejected. Register it with `CoRegisterMessageFilter`.
 
 ```cpp
 class MessageFilter : public IMessageFilter
@@ -533,6 +886,16 @@ public:
 ---
 
 ## 3.8 Deadlocks
+
+> A **deadlock** is two or more threads each waiting for something that the other will only give up *after* it stops waiting. Neither can move, neither times out, and the process simply stops. No error is returned, because nothing failed — everything is still patiently waiting.
+
+In ordinary multithreaded code, the thing being waited for is a lock. **In COM it usually is not.** The scarce resource is a *thread's attention*: a call into an STA can only ever be executed by that apartment's one thread (§3.2). If that thread is busy doing something else, the call cannot be delivered — and the caller waits forever.
+
+This is what makes COM deadlocks awkward to read in a dump. You are not looking for a thread holding a mutex; you are looking for a thread that is **not pumping**, and the thing it is effectively withholding is its own message queue.
+
+Every pattern below is the same circle in different clothes:
+
+> **A waits for B → B needs A to pump or return → A won't, because it is waiting.**
 
 ### Pattern 1 — STA thread blocks without pumping
 
