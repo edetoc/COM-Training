@@ -4,6 +4,19 @@
 
 Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here.
 
+> **DCOM** stands for **Distributed COM**. It is not a separate technology you opt into — it is the same COM from Modules 1–6, with the proxy/stub plumbing of Modules 3 and 4 carried over a **network transport** (Microsoft RPC) instead of staying inside one process. Your client code does not change at all: still `CoCreateInstance`, still `QueryInterface`, still the same interfaces. That is Module 0's third pillar, location transparency, cashed in.
+>
+> What DCOM adds is everything a boundary forces you to answer:
+>
+> | Question | Answered by |
+> |---|---|
+> | How does the call physically get there? | MSRPC — TCP port 135 plus a dynamic port range (§7.8) |
+> | **Who** is calling? | authentication levels (§7.4) |
+> | May they **start** the server? May they **call** it? | launch and access permissions (§7.1, §7.6) |
+> | Under **which account** does the server run? | the AppID's `RunAs` (§7.2) |
+>
+> One naming quirk to expect: in practice "DCOM" is used loosely for **any out-of-process COM configuration**, remote or not. That is why `dcomcnfg` and "DCOM permissions" (§7.6) apply just as much to a local `LocalServer32` on your own machine as to a server across the network.
+
 **Contents**
 
 - [7.1 The out-of-proc picture](#71-the-out-of-proc-picture)
@@ -42,12 +55,27 @@ Once a COM object lives in another process — or on another machine — activat
  └──────────────────┘                                                └──────────────────┘
 ```
 
+> **"SCM" here is COM's Service Control Manager** — the broker that maps a CLSID to a server, runs the security checks, starts the process, and hands the client back a marshaled reference.
+>
+> **It is a different component from the Windows Service Control Manager**, the one you drive with `sc.exe` and `Get-Service`. They share a name and an abbreviation and nothing else:
+>
+> | | COM's SCM | Windows' SCM |
+> |---|---|---|
+> | Job | turn a CLSID into a running object | start/stop/configure Windows **services** |
+> | Lives in | `rpcss.dll`, hosted by the `RpcSs` / `DcomLaunch` services | `services.exe` |
+> | Reads | `HKCR\CLSID`, `HKCR\AppID` | `HKLM\SYSTEM\CurrentControlSet\Services` |
+> | You reach it via | `CoCreateInstance`, `CoGetClassObject` | `sc.exe`, `Get-Service`, `OpenSCManager` |
+>
+> **They meet in exactly one place:** the `LocalService` value on an AppID (§7.2). When a COM server is packaged as a Windows service, COM's SCM does not call `CreateProcess` — it asks *Windows'* SCM to start that service, then waits for it to call `CoRegisterClassObject`. That single hand-off is why a COM activation can fail with a plain service error such as `0x80070422` (service disabled).
+
 > **The identifiers in that diagram.** An **OXID** (Object Exporter ID) identifies the *apartment* that hosts an object, and is what the client's RPC layer resolves into an actual binding — a machine, a protocol, and an endpoint. An **IPID** (Interface Pointer ID) identifies one specific *interface pointer* on one specific object within that apartment. Together they are the wire form of "which object, where." You'll meet both in WinDbg when inspecting proxies (Module 8), and `RPC_E_DISCONNECTED` means the OXID no longer resolves — the hosting apartment is gone.
 
 Two distinct security checks happen:
 
-1. **Launch/Activation permission** — may this client *start* (or activate in) this server? Checked by the SCM before `CreateProcess`.
-2. **Access permission** — may this client *call* into the running server? Checked per-call by the RPC layer.
+1. **Launch/Activation permission** — step 3 in the diagram. *May this client **start** this server, or activate an object inside it?* The SCM checks the caller's token against the **`LaunchPermission`** security descriptor stored on the AppID key (§7.2), and it does so **before** `CreateProcess` — so a failure here means the server process never even starts. If the AppID carries no `LaunchPermission` value, the machine-wide default under `HKLM\SOFTWARE\Microsoft\Ole` applies instead.
+2. **Access permission** — may this client *call* into the running server? Checked per-call by the RPC layer, against `AccessPermission`.
+
+> **`LaunchPermission` is not one right, it is four:** *Local Launch*, *Remote Launch*, *Local Activation*, and *Remote Activation*. They are granted and denied independently, which is why "it works on the box but not from another machine" is a permissions answer at least as often as it is a firewall one. `dcomcnfg` shows all four as separate checkboxes (§7.6).
 
 They are configured separately and fail differently. Confusing them is the most common diagnostic error.
 
@@ -108,17 +136,40 @@ Consequences you must know cold:
 
 **Diagnostic:** in Task Manager, add the **Session** column. A COM server sitting in session 0 that was supposed to be interactive — or a `dllhost.exe` piling up in session 0 — is the signature.
 
-```powershell
-Get-Process dllhost, excel -EA SilentlyContinue |
-    Select-Object Id, ProcessName, SessionId, @{n='User';e={
-        (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").GetOwner().User }}
-```
-
 ---
 
 ## 7.4 `CoInitializeSecurity`
 
-Sets the process-wide security for COM. Called **once per process**, before any COM calls (or COM calls it implicitly with defaults on your first activation — after which you can't change it).
+Sets the process-wide security policy for COM: how callers are authenticated, whether this process may impersonate them, and who is allowed to call in at all.
+
+### How it differs from `CoInitializeEx`
+
+Two unrelated jobs that happen to sit next to each other in startup code:
+
+| | `CoInitializeEx` | `CoInitializeSecurity` |
+|---|---|---|
+| Scope | per **thread** | per **process** |
+| Decides | which apartment this thread joins (§3.4) | authentication, impersonation and access policy for *every* COM call in the process |
+| Who calls it | **every** thread that touches COM | **one** thread, once |
+| Mandatory? | yes — or you get `CO_E_NOTINITIALIZED` | no — COM will pick defaults for you |
+
+### Who should call it
+
+- **Out-of-proc server EXEs — yes, explicitly.** You are a callable surface, so state your own terms instead of inheriting whatever the registry happens to say.
+- **Clients — only when they need to.** To raise the authentication level, pick an impersonation level, or set `EOAC_*` flags. Note that a client receiving **callbacks** (a Module 5 sink) is itself a server, and needs this too.
+- **In-proc DLLs — no.** You do not own the process. It is usually too late by the time you load, and if it isn't, you have just silently rewritten your host's security policy.
+
+### When to call it
+
+After `CoInitializeEx` on that thread, and **before any other COM call** — before activating anything or marshaling any interface.
+
+```
+CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // 1. per-thread: pick an apartment
+CoInitializeSecurity(...);                       // 2. once per process: set the policy
+// ... only now do any COM work
+```
+
+**If you never call it,** COM calls it for you at the first activation or marshal, using the AppID's `AuthenticationLevel` and permissions, falling back to the machine defaults under `HKLM\SOFTWARE\Microsoft\Ole`. That is perfectly acceptable for many clients — but it is **one-shot**. Once the policy is set, explicitly or implicitly, it cannot be changed: a later call returns **`RPC_E_TOO_LATE` (`0x80010119`)**. In practice that error means *something did COM work before you got here* — a static initializer, a helper library, or a logging call.
 
 ```cpp
 HRESULT hr = CoInitializeSecurity(

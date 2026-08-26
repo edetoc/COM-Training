@@ -495,7 +495,8 @@ Same cmdlet, same properties, same code. Different continent, if you like. That'
 | **Apartment** | A thread-safety boundary. Module 3. |
 | **Marshaling** | Packaging a call so it can cross an apartment/process/machine boundary. |
 | **Proxy / Stub** | Client-side and server-side halves of the marshaling machinery. |
-| **SCM** | Service Control Manager for COM — actually the `RpcSs` service. Finds and launches servers. |
+| **SCM** | COM's **Service Control Manager** — the broker that turns a CLSID into a running server. Confusingly, this is **not** the Windows Service Control Manager that starts and stops services; they merely share a name. COM's SCM is implemented by the `RpcSs` / `DcomLaunch` services. |
+| **DCOM** | **Distributed COM** — the same COM, carried over a network transport so a client can use an object in another process or on another machine. Module 7. |
 | **AppID** | Registry entry holding *process-wide* settings for out-of-proc servers: identity, permissions, surrogate. |
 
 **Crucial distinction that beginners always get wrong:**
