@@ -263,7 +263,30 @@ public:
 
 ### `VARIANT`
 
-A tagged union. `vt` says what's in it.
+**The problem it solves.** A scripting language has no types at compile time. When VBScript runs `x = calc.Add(2, 3)`, the engine must hand COM "a value" without knowing whether it is a number, a string, a date, or an object — and receive one back the same way. C++ has no such type, so Automation defines one.
+
+**What it physically is.** A fixed-size struct with two parts: a tag called `vt` saying *which* type is stored, and a union holding the value. You set both, and you read `vt` before ever touching the union.
+
+```cpp
+VARIANT v;
+VariantInit(&v);          // vt = VT_EMPTY
+
+v.vt   = VT_I4;           // 1. declare what it holds
+v.lVal = 42;              // 2. store it in the matching union field
+
+if (v.vt == VT_I4)        // reading: ALWAYS check the tag first
+    printf("%ld\n", v.lVal);
+```
+
+**A `VARIANT` can own what it holds.** If it contains a `BSTR`, a `SAFEARRAY`, or an interface pointer, that resource belongs to the variant — so it has to be freed. `VariantClear` reads `vt`, does whichever of `SysFreeString` / `SafeArrayDestroy` / `Release` applies, and resets the variant to `VT_EMPTY`:
+
+```cpp
+VariantClear(&v);         // the only correct way to dispose of a VARIANT
+```
+
+Forgetting it leaks; guessing the wrong free function corrupts the heap (§4.3). In practice use **`CComVariant`** (ATL) or **`_variant_t`**, which call `VariantInit` and `VariantClear` for you.
+
+### The `vt` values
 
 | `vt` | Contents | Field |
 |---|---|---|
@@ -308,6 +331,15 @@ Use `CComVariant`, which is a `VARIANT` with a constructor, destructor (`Variant
 
 A self-describing array: element type, dimensions, bounds, and (for `VT_BSTR`/`VT_VARIANT`/`VT_DISPATCH`) proper element cleanup.
 
+**How it relates to `VARIANT`.** They are two separate types that are designed to compose:
+
+| | Holds |
+|---|---|
+| `VARIANT` | **one** value, of **any** type |
+| `SAFEARRAY` | **many** values, all of **one** type |
+
+They *have* to compose, because `IDispatch::Invoke` carries every argument and every return value as a `VARIANT` (§5.2). An array can therefore only reach a script by riding inside one. That is what `VT_ARRAY` means: set `vt` to `VT_ARRAY | <element type>` and put the `SAFEARRAY*` in the `parray` field.
+
 ```cpp
 #include <atlsafe.h>
 
@@ -315,9 +347,13 @@ CComSafeArray<LONG> sa(5);              // 5 elements, lower bound 0
 for (LONG i = 0; i < 5; ++i) sa[i] = i * i;
 
 CComVariant v;
-v.vt = VT_ARRAY | VT_I4;
+v.vt = VT_ARRAY | VT_I4;                // "this variant holds an array of LONG"
 v.parray = sa.Detach();                 // v now owns it; VariantClear will destroy it
 ```
+
+**Ownership follows containment.** Once the `SAFEARRAY*` is inside the variant, `VariantClear` calls `SafeArrayDestroy` for you. That is why the code says `Detach()` — it hands ownership over. Assigning without detaching leaves two owners and a double free.
+
+**And the nesting works the other way too.** A `SAFEARRAY` whose *elements* are `VARIANT`s — `VT_ARRAY | VT_VARIANT` — gives you many values each of any type. That is exactly what VBScript's `Array(1, "two", #2020-03-04#)` produces, and it is the shape you will meet most often coming from scripts.
 
 Raw form, for when you must:
 
@@ -423,7 +459,53 @@ For late-bound calls, `Invoke`'s `pExcepInfo` carries the same information. If y
 
 ## 5.7 Connection points — COM events
 
-COM's callback/event mechanism. The **source** (your object) notifies **sinks** (client objects).
+COM's callback/event mechanism, built from two roles:
+
+> - The **source** is the object that raises events — normally the server object you wrote.
+> - The **sink** is the object that *receives* them, and it is implemented by the **client**.
+>
+> The names are a plumbing metaphor: events flow out of a source and into a sink.
+
+```
+                     ordinary call
+   ┌──────────┐  ──────────────────────►  ┌──────────────┐
+   │  CLIENT  │      Add(2, 3, &r)        │    SERVER    │
+   │          │                           │              │
+   │  + SINK  │  ◄──────────────────────  │  = SOURCE    │
+   └──────────┘      OnCalculated(5)      └──────────────┘
+                        the event
+```
+
+Note what the picture shows: **the same two parties, calls running both ways.** Ordinary calls go left to right; events are calls going right to left. The sink is simply the client's end of the return pipe.
+
+A sink is **a full COM object, not a function pointer.** It implements `IUnknown` plus the event interface (`_ICalculatorEvents` below), so the source can call it exactly like any other COM interface — which also means the roles invert for events: the server is the caller and the client is the callee. In VB, C#, and VBA the tooling builds that sink object for you behind `WithEvents` and `+=`; in C++ you write it yourself.
+
+### The problem being solved
+
+Every call so far has travelled one way: client → object. A vtable is a list of functions the *client* invokes. But an object often needs to tell its client something **without being asked** — to start a call of its own, in the opposite direction:
+
+- a long operation finished, or wants to report progress;
+- a value the client is displaying has just changed;
+- a document was saved, a cell was edited, a device was plugged in.
+
+The object cannot simply call its client back. **It has no idea who its clients are** — `CoCreateInstance` hands out interface pointers; it does not tell the object who received them.
+
+**Why not just add a callback method?** You could put `SetCallback(IProgress*)` on your interface, and it would work. But it handles exactly one subscriber and one event interface — and it is a private convention that you invented. No scripting host, form designer, or IDE can discover it, because there is nothing standard for them to look for. That is the same class of problem Module 0 says COM exists to remove.
+
+So connection points standardize four things:
+
+| The need | The mechanism |
+|---|---|
+| Advertise which event sets I can raise | `IConnectionPointContainer`, plus `[source]` in the type library |
+| Subscribe and unsubscribe | `IConnectionPoint::Advise` / `Unadvise` |
+| Support **many** independent subscribers | the connection point holds a *list* of sinks, not one pointer |
+| Let tools wire events up for you | the typelib describes the event interface, so VB's `WithEvents`, C#'s `+=`, and VBA's `Private Sub obj_Event()` can all be generated automatically |
+
+That last row is the payoff. It is why an event handler in VBA or C# takes one line and no plumbing.
+
+And because a callback is simply a COM call travelling the other way, it marshals across apartments and processes like any other call (Modules 3 and 4) — the sink does not have to live in the source's process.
+
+The price is a **reference cycle by construction**, which is where this section's classic leak comes from.
 
 ### The shape
 
@@ -554,24 +636,69 @@ public:
 };
 ```
 
+### Subscribing: who calls `Advise`, and what it does
+
+**The client calls it** — and it is an ordinary client → server call, the last one that runs in that direction. It means: *"here is my sink object; add it to your list of subscribers."*
+
+Getting there takes four calls, and only the third is `Advise` itself:
+
+| Step | Call | What it asks for |
+|---|---|---|
+| 1 | `QueryInterface(IID_IConnectionPointContainer)` | "do you raise events at all?" |
+| 2 | `FindConnectionPoint(DIID__ICalculatorEvents)` | "give me the connection point for **this particular** event set" — one object can offer several |
+| 3 | `Advise(pSink, &cookie)` | "here is my sink object; subscribe it" |
+| 4 | `Unadvise(cookie)` | later: "cancel that subscription" |
+
+Inside `Advise`, the source does three things:
+
+1. calls `QueryInterface` on your sink for the event interface — if the sink does not implement it, `Advise` fails with `CONNECT_E_CANNOTCONNECT`;
+2. **`AddRef`s the sink** and stores the pointer in its subscriber list;
+3. returns a **cookie** — a token identifying *this one* subscription, which is why `Unadvise` takes it and why many sinks can subscribe independently.
+
+Step 2 is the source half of the reference cycle. And from the moment `Advise` returns, the direction reverses: everything the source sends afterwards is a server → client call.
+
 Subscribe and — critically — unsubscribe:
 
 ```cpp
+// spCalc is the Calculator object, already created with CoCreateInstance.
+// (HRESULTs are omitted here for room - check every one of them in real code.)
+
+// --- Step 1: does this object raise events at all? ------------------------
 CComPtr<IConnectionPointContainer> spCPC;
 spCalc->QueryInterface(IID_IConnectionPointContainer, (void**)&spCPC);
+// E_NOINTERFACE here would mean "this component offers no events".
 
+// --- Step 2: get the connection point for THIS event set ------------------
 CComPtr<IConnectionPoint> spCP;
 spCPC->FindConnectionPoint(DIID__ICalculatorEvents, &spCP);
+// DIID_ is the IID of a dispinterface. One object can expose several
+// connection points, so you must say which event set you mean.
 
-CalcSink* pSink = new CalcSink();
-DWORD cookie = 0;
-spCP->Advise(pSink, &cookie);        // source now holds a reference to pSink
-pSink->Release();                    // we drop ours; the source keeps it alive
+// --- Step 3: create our sink object and subscribe it ----------------------
+CalcSink* pSink = new CalcSink();    // CalcSink starts at m_cRef = 1  -> count 1
+DWORD cookie = 0;                    // receives the subscription's token
 
+spCP->Advise(pSink, &cookie);        // the source AddRefs the sink    -> count 2
+
+pSink->Release();                    // we drop OUR reference          -> count 1
+                                     // The source still holds one, so the sink lives
+                                     // exactly as long as the subscription does.
+                                     // Only correct because Advise succeeded - if it
+                                     // failed, this Release is the last one and the
+                                     // sink dies while we still expect events.
+
+// --- Events now travel server -> client -----------------------------------
 long r = 0;
-spCalc->Add(2, 3, &r);               // fires OnCalculated
+spCalc->Add(2, 3, &r);               // inside Add the source calls Fire_OnCalculated,
+                                     // which lands in our CalcSink::Invoke
 
-spCP->Unadvise(cookie);              // <<<<<< MANDATORY
+// --- Step 4: unsubscribe --------------------------------------------------
+spCP->Unadvise(cookie);              // the source Releases the sink    -> count 0
+                                     // -> CalcSink deletes itself.
+                                     // MANDATORY. Omit it and nothing is ever
+                                     // destroyed - see the next section.
+
+// spCP and spCPC are CComPtr, so they Release themselves at end of scope.
 ```
 
 ### The classic leak
