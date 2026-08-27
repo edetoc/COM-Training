@@ -478,6 +478,7 @@ The source generator emits the marshaling code at compile time — AOT-compatibl
 > - **Elevation:** required for `regsvr32`.
 > - **Bitness:** x64, matching the Module 2 client you reuse.
 > - **Depends on:** the hand-written Module 2 server — kept, not deleted. The comparison table is the deliverable.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) for the "before", and [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/)'s README for the "after".
 > - **Time:** ~2 h.
 
 1. **File → New → Project → ATL Project**, DLL, no attributes.
@@ -516,6 +517,7 @@ Understanding that `CComObject<T>` is the thing actually instantiated (not `T`) 
 > - **Elevation:** required — `regsvr32` on the generated `*.comhost.dll`.
 > - **Bitness:** the comhost is **architecture-specific**. Publish it for the same architecture as the calling client (`-r win-x64`), or you reproduce `0x80040154`.
 > - **Depends on:** the Lab 6.1 ATL server for Direction 2.
+> - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), registered.
 > - **Extra machine:** Direction 3 needs a **clean VM or second machine** that does not have the interop assembly deployed — on your dev box the failure will not reproduce.
 > - **Time:** ~3 h.
 
@@ -568,6 +570,7 @@ Build the C# client with `<EmbedInteropTypes>false</EmbedInteropTypes>`, deploy 
 > - **Elevation:** required once, to register `Training.Calculator.1`.
 > - **Bitness:** match the registered server.
 > - **Depends on:** a registered `Training.Calculator.1` (Lab 6.1) with the Module 1 ref-count tracing still compiled in.
+> - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), registered, with a `Trace` call added to its `AddRef`/`Release` so you can see when the RCW really releases.
 > - **Time:** ~1 h.
 
 ```csharp

@@ -798,6 +798,7 @@ ATL's `CComEnumOnSTL` / `IEnumOnSTLImpl` implement `IEnumVARIANT` over an STL co
 > - **Elevation:** required, to register the server **and its type library** (`regsvr32` on a server with an embedded TLB, or `RegisterTypeLib`). Late binding by ProgID needs the CLSID; `#import` and early-bound C# need the TLB.
 > - **Bitness:** register x64 and use the 64-bit hosts — `%SystemRoot%\System32\cscript.exe` is 64-bit, `%SystemRoot%\SysWOW64\cscript.exe` is 32-bit. Picking the wrong one reproduces Lab 2.2's error, which is a useful accident.
 > - **Depends on:** a dual-interface `Calculator` with a registered type library — easiest via the ATL server in Lab 6.1, or the Module 4 IDL plus a hand-written `IDispatch`.
+> - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/) — its README is a five-minute wizard recipe that produces exactly the server this lab needs.
 > - **Time:** ~3 h.
 
 Build a `Calculator` with a dual interface, then call it from C++ (early and late bound), PowerShell, VBScript, and C#.
@@ -924,6 +925,7 @@ Then time 100,000 calls each. Early-bound C++ vs VBScript typically differs by *
 > - **Elevation:** required, to register the server and TLB.
 > - **Bitness:** x64, matching the PowerShell host you use.
 > - **Depends on:** the Lab 5.1 server, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
+> - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), built with connection points enabled (step 4 of its README).
 > - **Time:** ~2 h.
 
 1. Add `_ICalculatorEvents` with `OnCalculated`, implement the connection point, and wire up the C++ sink from §5.7. Confirm the callback fires.

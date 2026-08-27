@@ -645,6 +645,7 @@ int wmain()
 > - **Elevation:** **required.** `regsvr32` writes to `HKLM\Software\Classes`, and ProcMon needs admin to load its driver. The per-user variant at the end of the lab deliberately runs *without* elevation.
 > - **Bitness:** x64 DLL and x64 client. Keep them matched — mismatching them is Lab 2.2.
 > - **Depends on:** the `Calc.dll` and `CalcClient.exe` sources from §2.5.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — `.\build.ps1`, then register `x64\Calc.dll` from an elevated prompt.
 > - **Time:** ~90 min.
 
 1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
@@ -681,6 +682,7 @@ This experiment is worth an hour; it explains a whole family of tickets.
 > - **Elevation:** required.
 > - **Bitness:** you need **all four** binaries — x86 and x64 of both DLL and client.
 > - **Depends on:** Lab 2.1.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — build **both** bitnesses: `.\build.ps1` from an x64 developer prompt, and `.\build.ps1 -Arch x86` from an x86 one.
 > - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in Lab 7.2.
 > - **Time:** ~60 min.
 
@@ -721,6 +723,7 @@ Now call with `CLSCTX_LOCAL_SERVER`. The object runs in `dllhost.exe`. Verify wi
 > - **Elevation:** not required to *run* the lab — that is the entire point. You do need admin **once**, up front, to unregister the component.
 > - **Bitness:** the manifest's `processorArchitecture` must match the build exactly (`amd64` for x64, `x86` for 32-bit). A mismatch fails silently and falls back to the registry.
 > - **Depends on:** Lab 2.1 binaries, then **fully unregistered** (`regsvr32 /u`) — otherwise the registry satisfies the activation and you prove nothing.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/), built but **not** registered.
 > - **Time:** ~90 min.
 
 Modern deployment avoids the registry entirely: no admin rights, no machine-wide state, side-by-side versions, and clean uninstall. Activation data comes from **manifests** read into the process's **activation context**.
@@ -868,6 +871,7 @@ certutil -error 0x8007007e
 > - **Elevation:** required — you edit `HKCR` values and registry ACLs.
 > - **Bitness:** x86 and x64 builds (row 2).
 > - **Depends on:** Labs 2.1 and 2.2.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/), both bitnesses built. Copy the folder first — this lab breaks things on purpose.
 > - **Caution:** run this on a **VM or dedicated test machine**. Rows 8 and 9 deny *your own account* Read access to a registry key and a file. Export the key and record the original ACL (`icacls <file> /save`) before you change anything, and restore it at the end.
 > - **Time:** ~2 h.
 

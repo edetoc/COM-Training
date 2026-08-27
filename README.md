@@ -36,6 +36,20 @@ Reference material for topics the main modules use but don't stop to teach. Read
 - Build all labs as **C++ Desktop / Console** projects first (raw COM shows you the machinery), then repeat key ones with smart pointers and C#.
 - Environment: Visual Studio (Desktop development with C++ + .NET desktop), Windows SDK, and the **Debugging Tools for Windows** (WinDbg).
 
+### Starting a lab without doing the previous one
+
+The course grows **one** `Calculator` component across all eight modules, so labs build on each other. [`labs/`](labs/) holds a working snapshot of that component at each of five stages, so any lab can be started cold:
+
+| Stage | Folder | Labs that start here |
+|---|---|---|
+| 1 — manual `IUnknown` | [`labs/stage-1-manual-iunknown/`](labs/stage-1-manual-iunknown/) | 1.1, 1.2 |
+| 2 — in-proc DLL server | [`labs/stage-2-inproc-server/`](labs/stage-2-inproc-server/) | 2.1–2.4, 3.1–3.3, 6.1 |
+| 3 — IDL and proxy/stub | [`labs/stage-3-idl-marshaling/`](labs/stage-3-idl-marshaling/) | 4.1–4.3, 7.2 |
+| 4 — ATL rewrite | [`labs/stage-4-atl-server/`](labs/stage-4-atl-server/) | 5.1, 5.2, 6.2, 6.3 |
+| 5 — out-of-proc EXE server | [`labs/stage-5-exe-server/`](labs/stage-5-exe-server/) | 7.1, 7.3, 7.4 |
+
+Every lab's **Requirements** block names the stage it starts from. Each stage folder has a README with build and verify steps; open a *Developer PowerShell for VS* and run `.\build.ps1`.
+
 ### Tooling checklist (install before Module 1)
 
 | Tool | Purpose |

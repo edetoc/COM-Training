@@ -1,0 +1,50 @@
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+    object,
+    uuid(A1B2C3D4-0001-4000-9000-000000000001),
+    pointer_default(unique),
+    helpstring("ICalculator Interface")
+]
+interface ICalculator : IUnknown
+{
+    HRESULT Add([in] LONG a, [in] LONG b, [out, retval] LONG* result);
+
+    HRESULT Subtract([in] LONG a, [in] LONG b, [out, retval] LONG* result);
+
+    // Caller supplies a buffer; callee writes into it. Caller owns it.
+    HRESULT Checksum([in, size_is(cb)] const BYTE* data,
+                     [in] ULONG cb,
+                     [out, retval] ULONG* checksum);
+
+    // Callee allocates; CALLER frees with SysFreeString.
+    HRESULT Describe([out, retval] BSTR* description);
+
+    // Callee allocates an array; caller frees with CoTaskMemFree.
+    HRESULT GetHistory([out] ULONG* count,
+                       [out, size_is(, *count)] LONG** values);
+
+    // Property-style accessors.
+    [propget] HRESULT Precision([out, retval] LONG* value);
+    [propput] HRESULT Precision([in] LONG value);
+}
+
+[
+    uuid(A1B2C3D4-9999-4000-9000-000000000099),
+    version(1.0),
+    helpstring("Training Calculator 1.0 Type Library")
+]
+library TrainingCalcLib
+{
+    importlib("stdole2.tlb");
+
+    [
+        uuid(A1B2C3D4-1111-4000-9000-000000000001),
+        helpstring("Calculator Component")
+    ]
+    coclass Calculator
+    {
+        [default] interface ICalculator;
+    };
+};

@@ -538,6 +538,7 @@ Event 10036, DistributedCOM:
 > - **Elevation:** required — `YourServer.exe -RegServer` writes `LocalServer32` and the AppID under `HKLM`.
 > - **Bitness:** x64.
 > - **Depends on:** **Lab 4.1's proxy/stub DLL, registered.** Out-of-proc is not optional about marshaling: with no proxy/stub and no TLB, `CoCreateInstance` returns `E_NOINTERFACE` and the lab stops at step one.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — a complete EXE server and client. Register [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` **first**.
 > - **Time:** ~3 h.
 
 ```cpp
@@ -654,6 +655,7 @@ HKCR\AppID\CalcSrv.exe
 > - **Elevation:** required — AppID and CLSID writes under `HKLM`.
 > - **Bitness:** 32-bit DLL with a 64-bit client for the bridge step.
 > - **Depends on:** Lab 2.2 (the surrogate attempt you left failing) **and** Lab 4.1's registered proxy/stub — that registration is exactly what makes it work this time.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) built x86 and registered, plus [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) registered for **both** bitnesses.
 > - **Caution:** test machine or VM. Step 4 sets `RunAs = NT AUTHORITY\LocalService`, which changes the identity of every activation of that CLSID machine-wide. Export the AppID key first and remove the value when you are done.
 > - **Time:** ~90 min.
 
@@ -683,6 +685,7 @@ Set-ItemProperty "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Name "AppID" -Value $app
 > - **Elevation:** required throughout.
 > - **Bitness:** `dcomcnfg` shows the **64-bit** DCOM config. For a 32-bit AppID run `mmc comexp.msc /32` — a component that "isn't in the list" is usually this.
 > - **Depends on:** an AppID **you own**, from Lab 7.1 or 7.2.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — it registers AppID `{B1B2C3D4-2222-4000-9000-000000000002}`, which is the one to edit in `dcomcnfg`. Export that key before you touch it.
 > - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.8 tells you not to do.
 > - **Time:** ~2 h.
 
@@ -718,6 +721,7 @@ E_ACCESSDENIED on activation
 > - **Elevation:** required on **both** machines.
 > - **Bitness:** identical on both ends.
 > - **Depends on:** the Lab 7.1 EXE server, with the proxy/stub or type library registered on **A and B**. Registering it only on the server is the classic remote-DCOM failure and is worth reproducing on purpose.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on machine B, and [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` registered on **both** machines.
 > - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
 > - **Time:** ~3 h.
 

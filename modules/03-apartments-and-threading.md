@@ -968,6 +968,7 @@ Tearing down an STA while other apartments hold proxies to its objects yields `R
 > - **Elevation:** required once, to register the DLL.
 > - **Bitness:** x64 throughout.
 > - **Depends on:** the Module 1 `Calculator`, packaged as the Module 2 in-proc server and registered with **`ThreadingModel = Apartment`** — without that value COM will not enforce the STA rules this lab depends on.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/). Change `ThreadingModel` from `"Both"` to `"Apartment"` in `DllRegisterServer`, rebuild, and re-register.
 > - **Time:** ~90 min.
 
 Build a console app. Use the `Calculator` object from Module 1 (in-proc, `ThreadingModel = Apartment` so COM enforces STA rules).
@@ -1099,6 +1100,7 @@ int main()
 > - **Elevation:** not required to debug a process you launched yourself.
 > - **Bitness:** x64 — and the debugger must match the target.
 > - **Depends on:** Lab 3.1 (the registered `Calculator` and the GIT plumbing).
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) registered as `Apartment`, exactly as for Lab 3.1. You do not need Lab 3.1's client — this lab's listing is self-contained.
 > - **Time:** ~2 h.
 
 This lab is the single best preparation for real hang tickets.
@@ -1188,6 +1190,7 @@ lmvm combase                    ; confirm symbols are loaded
 > - **Elevation:** required — five CLSID registrations.
 > - **Bitness:** x64.
 > - **Depends on:** the Module 2 in-proc server, with `DllGetClassObject` extended to accept all five CLSIDs and return the same factory.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — extend `DllGetClassObject` and `DllRegisterServer` to cover five CLSIDs, one per `ThreadingModel`.
 > - **Time:** ~2 h.
 
 **Do this lab.** It converts §3.3's table from something you read into something you know.

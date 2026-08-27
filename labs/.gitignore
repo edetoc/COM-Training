@@ -1,0 +1,15 @@
+# Build output directories - each stage builds into x64\ or x86\,
+# which is also where MIDL writes its generated files.
+x64/
+x86/
+
+# Loose build output
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.tlb
+*.res

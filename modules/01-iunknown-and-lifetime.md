@@ -594,6 +594,7 @@ One more you'll meet in the lab: `__declspec(novtable)` on an interface declarat
 > - **Elevation:** not required — no registry, no registration.
 > - **Bitness:** x64.
 > - **Depends on:** nothing. This is the first lab.
+> - **Starting point:** type it yourself — that is the exercise. The finished version is in [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/) if you get stuck or want to check yourself.
 > - **Time:** ~2 h.
 
 **No ATL. No WRL. No smart pointers.** You need to feel the machinery once.
@@ -802,7 +803,7 @@ static void ShowFailureBehaviour()
     CreateCalculator(IID_ICalculator, (void**)&p, "fail");
 
     // 1. A failed QI must NULL the [out] pointer, even if it arrived holding garbage.
-    IClassFactory* pCF = reinterpret_cast<IClassFactory*>(0xDEADBEEF);
+    IClassFactory* pCF = reinterpret_cast<IClassFactory*>(static_cast<UINT_PTR>(0xDEADBEEF));
     HRESULT hr = p->QueryInterface(IID_IClassFactory, (void**)&pCF);
     printf("QI  hr = 0x%08X (E_NOINTERFACE), pCF = %p (MUST be null)\n", hr, pCF);
     assert(hr == E_NOINTERFACE && pCF == nullptr);
@@ -850,6 +851,7 @@ int main()
 > - **Elevation:** not required.
 > - **Bitness:** x64.
 > - **Depends on:** Lab 1.1 — you reuse `Calculator.h` and the `Calculator` implementation.
+> - **Starting point:** [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/) — `.\build.ps1`, then `.\Lab01.exe`. Skipped Lab 1.1? Start here.
 > - **Time:** ~1 h.
 
 Manual `Release` is error-prone the moment you have early returns or exceptions. Compare four styles.
@@ -1067,6 +1069,7 @@ In a dump, for the crash family: `!heap -p -a <ptr>` will often show the block a
 > - **Tools:** none to begin with. Read these with the compiler closed; open Visual Studio afterwards only to check yourself. The optional last step wants WinDbg and Application Verifier.
 > - **Elevation:** not required, except for the optional Application Verifier step.
 > - **Depends on:** §1.3 and §1.4. No code from the earlier labs.
+> - **Starting point:** none needed — read the snippets as they are. The optional last step uses [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/).
 > - **Time:** ~30 min. Give yourself 60 seconds per snippet.
 
 Eight snippets of plausible, review-passing code. For each one, write down three things **before** you open the answer key:
