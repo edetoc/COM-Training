@@ -113,7 +113,7 @@ Reusing the queue drags in two practical details, and these are the two things p
 1. **You need an address to send to.** A Windows message is addressed to a **window handle**, not to a thread. So when a thread enters an STA, COM creates a window for it: hidden, message-only, class `OleMainThreadWndClass`. Its entire job is to be a valid destination whose owning thread happens to be the STA thread.
 2. **A queue is only an inbox.** Something must take items out of it and act on them. That is the **message pump** — `GetMessage` + `DispatchMessage` in a loop — and it is **your** code, not COM's. This is the origin of the rule that an STA thread *must pump*.
 
-So there are three pieces, not one:
+So there are three pieces:
 
 | Piece | Belongs to | Role |
 |---|---|---|
