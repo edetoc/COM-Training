@@ -48,7 +48,7 @@ The course grows **one** `Calculator` component across all eight modules, so lab
 | 4 — ATL rewrite | [`labs/stage-4-atl-server/`](labs/stage-4-atl-server/) | 5.1, 5.2, 6.2, 6.3 |
 | 5 — out-of-proc EXE server | [`labs/stage-5-exe-server/`](labs/stage-5-exe-server/) | 7.1, 7.3, 7.4 |
 
-Every lab's **Requirements** block names the stage it starts from. Each stage folder has a README with build and verify steps; open a *Developer PowerShell for VS* and run `.\build.ps1`.
+Every lab's **Requirements** block names the stage it starts from. Each stage folder has a README with build and verify steps — open its `.sln` in Visual Studio, pick a configuration, and build.
 
 ### Tooling checklist (install before Module 1)
 

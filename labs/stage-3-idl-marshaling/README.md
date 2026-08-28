@@ -12,20 +12,24 @@ cannot leave its apartment without it.
 |---|---|
 | `Calculator.idl` | The interface, with the memory-ownership attributes Module 4 dissects |
 | `CalcPS.def` | Exports for the proxy/stub DLL |
-| `build.ps1` | Runs MIDL, then compiles and links `CalcPS.dll` |
+| `CalcPS.vcxproj` | The project to open |
 
 ## Steps
 
-1. Open a **Developer PowerShell for VS (x64)**. MIDL is only on `PATH` there.
-2. `cd` into this folder.
-3. Build:
-   ```powershell
-   .\build.ps1
-   ```
-4. Register the proxy/stub from an **elevated** prompt:
+1. Open **`CalcPS.vcxproj`**.
+2. Pick **Debug | x64** and build.
+3. Register the proxy/stub from an **elevated** prompt:
    ```powershell
    regsvr32 "<full path>\labs\stage-3-idl-marshaling\x64\CalcPS.dll"
    ```
+
+This one is an **NMake project** rather than a normal C++ one, because MSBuild needs its source
+list before the build starts and `dlldata.c` does not exist until MIDL has run. Open the `.vcxproj`
+in a text editor — the three commands (MIDL, `cl`, `link`) are written out in full, and together
+they are the entire recipe for a proxy/stub DLL.
+
+> Lab 4.1 itself has you run MIDL **by hand** from a Developer PowerShell, which is worth doing
+> once. This project is the shortcut for later labs that merely need the DLL registered.
 
 ## Verify
 
@@ -50,10 +54,9 @@ The generated files land in `.\x64\`. Open each one:
 ## Building 32-bit as well (Lab 4.2)
 
 The surrogate experiment pairs a 32-bit DLL with a 64-bit client, and **each side loads its own
-proxy**. Open a Developer PowerShell for VS (x86) and run:
+proxy**. Switch the platform dropdown to **x86**, build, and register with the 32-bit `regsvr32`:
 
 ```powershell
-.\build.ps1 -Arch x86
 C:\Windows\SysWOW64\regsvr32.exe "<full path>\x86\CalcPS.dll"
 ```
 

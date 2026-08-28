@@ -645,7 +645,7 @@ int wmain()
 > - **Elevation:** **required.** `regsvr32` writes to `HKLM\Software\Classes`, and ProcMon needs admin to load its driver. The per-user variant at the end of the lab deliberately runs *without* elevation.
 > - **Bitness:** x64 DLL and x64 client. Keep them matched — mismatching them is Lab 2.2.
 > - **Depends on:** the `Calc.dll` and `CalcClient.exe` sources from §2.5.
-> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — `.\build.ps1`, then register `x64\Calc.dll` from an elevated prompt.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — open `Stage2.sln`, build **Debug | x64**, then register `x64\Calc.dll` from an elevated prompt.
 > - **Time:** ~90 min.
 
 1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
@@ -682,7 +682,7 @@ This experiment is worth an hour; it explains a whole family of tickets.
 > - **Elevation:** required.
 > - **Bitness:** you need **all four** binaries — x86 and x64 of both DLL and client.
 > - **Depends on:** Lab 2.1.
-> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — build **both** bitnesses: `.\build.ps1` from an x64 developer prompt, and `.\build.ps1 -Arch x86` from an x86 one.
+> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — open `Stage2.sln` and build **both** platforms: once with the dropdown on **x64**, once on **x86**.
 > - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in Lab 7.2.
 > - **Time:** ~60 min.
 

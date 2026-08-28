@@ -340,7 +340,7 @@ This is also the reason **Lab 2.2's surrogate experiment failed**. Go back and f
 > - **Elevation:** not required — this lab only compiles.
 > - **Bitness:** `/env x64`, matching your build.
 > - **Depends on:** the IDL from §4.2. Generate **real** GUIDs; do not reuse the placeholders.
-> - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) — `.\build.ps1` runs MIDL and builds the proxy/stub for you. Reading its output *is* the lab.
+> - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) holds the finished `Calculator.idl` and a project that builds the proxy/stub. Run MIDL by hand at least once anyway — reading its output *is* the lab.
 > - **Time:** ~90 min — most of it spent reading the generated files, which is the point.
 
 ### Step 1 — write it

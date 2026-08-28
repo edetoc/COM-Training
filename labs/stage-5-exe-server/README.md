@@ -13,8 +13,7 @@ returns `0x80004002 E_NOINTERFACE` and this stage stops at step one.
 
 ```powershell
 cd ..\stage-3-idl-marshaling
-.\build.ps1
-# then, elevated:
+# open CalcPS.vcxproj, build Debug|x64, then from an elevated prompt:
 regsvr32 "<full path>\stage-3-idl-marshaling\x64\CalcPS.dll"
 ```
 
@@ -25,22 +24,20 @@ regsvr32 "<full path>\stage-3-idl-marshaling\x64\CalcPS.dll"
 | `Calculator.h` | `ICalculator`, the CLSID, and an **AppID** — new at this stage |
 | `CalcSrv.cpp` | Object, factory, `CoRegisterClassObject`, message loop, self-registration |
 | `CalcSrvClient.cpp` | A client that asks specifically for `CLSCTX_LOCAL_SERVER` |
+| `Stage5.sln` | The solution to open |
 
 ## Steps
 
-1. Open a **Developer PowerShell for VS (x64)**.
-2. `cd` into this folder and build:
-   ```powershell
-   .\build.ps1
-   ```
-3. Register from an **elevated** prompt (writes `LocalServer32` and the AppID):
+1. Open **`Stage5.sln`** — it contains `CalcSrv` (the server) and `CalcSrvClient`.
+2. Pick **Debug | x64**, then **Build → Build Solution**.
+3. Register from an **elevated** prompt (this writes `LocalServer32` and the AppID):
    ```powershell
    & "<full path>\labs\stage-5-exe-server\x64\CalcSrv.exe" -RegServer
    ```
-4. Run the client from a normal prompt:
-   ```powershell
-   .\x64\CalcSrvClient.exe
-   ```
+4. Right-click **CalcSrvClient → Set as Startup Project**, then press **F5**.
+
+To debug the *server*, use **Debug → Attach to Process** and pick `CalcSrv.exe` while the client is
+waiting at its prompt. You cannot F5 the server directly: the SCM launches it, not you.
 
 ## Verify
 

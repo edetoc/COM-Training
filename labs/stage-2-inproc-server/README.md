@@ -13,24 +13,23 @@ The Stage 1 object, now wrapped in a class factory and the four DLL exports, reg
 | `Calc.cpp` | Object, class factory, `DllGetClassObject`, `DllCanUnloadNow`, self-registration |
 | `Calc.def` | Exports the four entry points — without this `regsvr32` cannot find them |
 | `CalcClient.cpp` | A console client that activates by CLSID and by ProgID |
+| `Stage2.sln` | The solution to open |
 
 ## Steps
 
-1. Open a **Developer PowerShell for VS (x64)**.
-2. `cd` into this folder.
-3. Build:
-   ```powershell
-   .\build.ps1
-   ```
-   Output lands in `.\x64\`.
-4. Open a **second, elevated** PowerShell (registration writes to `HKLM`), and register:
+1. Open **`Stage2.sln`** — it contains both `Calc` (the DLL) and `CalcClient`.
+2. Pick **Debug | x64**, then **Build → Build Solution**.
+3. Register the DLL from an **elevated** prompt (registration writes to `HKLM`):
    ```powershell
    regsvr32 "<full path>\labs\stage-2-inproc-server\x64\Calc.dll"
    ```
-5. Back in the normal shell, run the client:
-   ```powershell
-   .\x64\CalcClient.exe
-   ```
+4. Right-click **CalcClient → Set as Startup Project**, then press **F5**.
+
+The `Calc.def` module-definition file is already wired into the linker settings. §2.5.3 has you set
+that by hand and warns what happens when you forget, so it is worth opening
+**Calc → Properties → Linker → Input → Module Definition File** to see where it lives.
+
+Output lands in `x64\Calc.dll` and `x64\CalcClient.exe`.
 
 ## Verify
 
@@ -44,11 +43,8 @@ If you get `0x80040154 REGDB_E_CLASSNOTREG`, the DLL is not registered, or you r
 
 ## Building 32-bit as well (Lab 2.2)
 
-Lab 2.2 needs both bitnesses. Open a **Developer PowerShell for VS (x86)** and run:
-
-```powershell
-.\build.ps1 -Arch x86
-```
+Lab 2.2 needs both bitnesses. Change the platform dropdown to **x86** and build again — that is the
+whole step. Output goes to `x86\` alongside the x64 copy.
 
 Then register that copy with the **32-bit** `regsvr32`:
 
@@ -56,8 +52,8 @@ Then register that copy with the **32-bit** `regsvr32`:
 C:\Windows\SysWOW64\regsvr32.exe "<full path>\x86\Calc.dll"
 ```
 
-The script refuses to build a bitness that does not match your shell, because a silent mismatch
-here makes Lab 2.2 impossible to reason about.
+Note the two different `regsvr32` binaries: `System32` is the **64-bit** one, `SysWOW64` is the
+**32-bit** one. Yes, that naming is backwards (§2.3).
 
 ## Cleaning up
 

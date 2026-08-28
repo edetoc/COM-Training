@@ -13,19 +13,18 @@ later stage builds on.
 | `Calculator.h` | The two interfaces and their IIDs |
 | `Calculator.cpp` | The `Calculator` class, with `AddRef`/`Release` tracing, plus `CreateCalculator` |
 | `main.cpp` | Four functions that *prove* the `QueryInterface` rules with assertions |
+| `Lab01.sln` | The solution to open |
 
 ## Steps
 
-1. Open a **Developer PowerShell for VS (x64)**.
-2. `cd` into this folder.
-3. Build:
-   ```powershell
-   .\build.ps1
-   ```
-4. Run:
-   ```powershell
-   .\Lab01.exe
-   ```
+1. Open **`Lab01.sln`**.
+2. Pick **Debug | x64** in the toolbar.
+3. Press **F5**.
+
+Use F5 rather than Ctrl+F5. The whole point of this lab is watching the reference count move, and
+breakpoints on `AddRef` / `Release` are how you do that.
+
+Output lands in `x64\Lab01.exe`.
 
 ## Verify
 
@@ -47,8 +46,8 @@ object leaked. That is the entire skill this stage teaches.
   `DEFINE_GUID` macros into actual definitions. Every other translation unit gets `extern`
   declarations instead. Do this in exactly one `.cpp` or you will get duplicate-symbol errors at
   link time.
-- The build uses `/Zi` and `/DEBUG` so symbols exist. Lab 1.2 and several Module 8 exercises need
-  them.
+- The project builds with debug symbols in both configurations. Lab 1.2 and several Module 8
+  exercises need them.
 
 ## Where this goes next
 

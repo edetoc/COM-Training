@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  An NMake ("Makefile") project rather than a normal C++ one.
+
+  Reason: MSBuild needs its ClCompile item list at evaluation time, but
+  dlldata.c / Calculator_p.c / Calculator_i.c do not exist until MIDL has run.
+  So the three build steps are spelled out below instead. They are worth
+  reading - together they are the whole recipe for a proxy/stub DLL.
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1B2C3D4-0004-4000-9000-00000000A004}</ProjectGuid>
+    <RootNamespace>CalcPS</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Makefile</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <!-- PlatformShortName is not reliably set for Makefile projects, and MIDL's
+         /env spells 32-bit "win32" rather than "x86". Derive both explicitly. -->
+    <ArchDir Condition="'$(Platform)'=='x64'">x64</ArchDir>
+    <ArchDir Condition="'$(Platform)'=='Win32'">x86</ArchDir>
+    <MidlEnv Condition="'$(Platform)'=='x64'">x64</MidlEnv>
+    <MidlEnv Condition="'$(Platform)'=='Win32'">win32</MidlEnv>
+    <OutDir>$(ProjectDir)$(ArchDir)\</OutDir>
+    <!-- 1. MIDL turns the IDL into headers, IIDs, proxy code and a typelib.
+         2. cl compiles them; REGISTER_PROXY_DLL is what makes dlldata.c emit
+            DllRegisterServer, without which regsvr32 finds no entry point.
+         3. link produces the proxy/stub DLL itself. -->
+    <NMakeBuildCommandLine>if not exist "$(ProjectDir)$(ArchDir)" mkdir "$(ProjectDir)$(ArchDir)"
+midl /nologo /W1 /char signed /env $(MidlEnv) /out "$(ProjectDir)$(ArchDir)" /h Calculator.h /iid Calculator_i.c /proxy Calculator_p.c /dlldata dlldata.c /tlb Calculator.tlb "$(ProjectDir)Calculator.idl"
+cd /d "$(ProjectDir)$(ArchDir)"
+cl /nologo /c /W3 /Zi /DWIN32 /D_WIN32_WINNT=0x0A00 /DREGISTER_PROXY_DLL dlldata.c Calculator_p.c Calculator_i.c
+link /nologo /DLL /DEBUG /DEF:"$(ProjectDir)CalcPS.def" /OUT:CalcPS.dll dlldata.obj Calculator_p.obj Calculator_i.obj rpcrt4.lib ole32.lib oleaut32.lib kernel32.lib advapi32.lib</NMakeBuildCommandLine>
+    <NMakeReBuildCommandLine>$(NMakeBuildCommandLine)</NMakeReBuildCommandLine>
+    <NMakeCleanCommandLine>if exist "$(ProjectDir)$(ArchDir)" rmdir /s /q "$(ProjectDir)$(ArchDir)"</NMakeCleanCommandLine>
+    <NMakeOutput>$(ProjectDir)$(ArchDir)\CalcPS.dll</NMakeOutput>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="Calculator.idl" />
+    <None Include="CalcPS.def" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

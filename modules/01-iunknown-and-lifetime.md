@@ -851,7 +851,7 @@ int main()
 > - **Elevation:** not required.
 > - **Bitness:** x64.
 > - **Depends on:** Lab 1.1 — you reuse `Calculator.h` and the `Calculator` implementation.
-> - **Starting point:** [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/) — `.\build.ps1`, then `.\Lab01.exe`. Skipped Lab 1.1? Start here.
+> - **Starting point:** [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/) — open `Lab01.sln` and press F5. Skipped Lab 1.1? Start here.
 > - **Time:** ~1 h.
 
 Manual `Release` is error-prone the moment you have early returns or exceptions. Compare four styles.

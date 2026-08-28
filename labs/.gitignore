@@ -3,6 +3,11 @@
 x64/
 x86/
 
+# Visual Studio per-user state
+.vs/
+*.user
+*.aps
+
 # Loose build output
 *.exe
 *.dll
