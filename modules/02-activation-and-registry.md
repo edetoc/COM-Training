@@ -648,6 +648,10 @@ int wmain()
 > - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — open `Stage2.sln`, build **Debug | x64**, then register `x64\Calc.dll` from an elevated prompt.
 > - **Time:** ~90 min.
 
+This whole module turns on one question: how does a GUID become a running object? Here you answer it by doing it — build the server, register it, activate it, and then **watch the SCM work** in Process Monitor.
+
+The trace you capture is the reference picture of a *healthy* activation. Every failure in Lab 2.4 is a deviation from it, so keep it.
+
 1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
 2. Register from an **elevated** prompt (HKCR writes need admin):
    ```powershell
@@ -685,6 +689,10 @@ This experiment is worth an hour; it explains a whole family of tickets.
 > - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — open `Stage2.sln` and build **both** platforms: once with the dropdown on **x64**, once on **x86**.
 > - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in Lab 7.2.
 > - **Time:** ~60 min.
+
+A bitness mismatch is the most common activation failure there is, and it reports the *same* `0x80040154` as "never registered at all". Telling those two apart from the error code alone is impossible — you have to look at where the registration landed.
+
+So cause it deliberately, confirm in the registry exactly which hive received the keys, then fix it two different ways.
 
 1. Build `Calc.dll` as **x86**. Register with the 32-bit regsvr32:
    ```powershell

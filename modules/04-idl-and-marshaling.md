@@ -343,6 +343,10 @@ This is also the reason **Lab 2.2's surrogate experiment failed**. Go back and f
 > - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) holds the finished `Calculator.idl` and a project that builds the proxy/stub. Run MIDL by hand at least once anyway — reading its output *is* the lab.
 > - **Time:** ~90 min — most of it spent reading the generated files, which is the point.
 
+Until now `ICalculator` has existed only as a C++ header — readable by one compiler, and by nothing else. This lab describes the same interface in **IDL** and runs MIDL over it.
+
+The build takes a minute; the lab is what comes out. Those four generated files are what COM actually uses to carry a call across a boundary, and reading them is the difference between marshaling being magic and marshaling being obvious.
+
 ### Step 1 — write it
 
 Save the IDL from §4.2 as `Calculator.idl`. Generate real GUIDs.
@@ -448,6 +452,10 @@ Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\{A1B2C3D4-0001-4000-9000
 > - **Depends on:** Lab 4.1 (proxy/stub built) and Lab 2.2 (the surrogate registration you left failing).
 > - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) built for **both** bitnesses and registered, plus [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) x86 registered.
 > - **Time:** ~2 h.
+
+Marshaling is invisible while it works. This lab switches it on and off underneath a client that never changes, so you can see precisely **which call fails and when** — activation or first method — and how that differs between a proxy/stub DLL and typelib marshaling.
+
+It also closes Lab 2.2: the surrogate that could not work then works now, and you will know exactly which registration made the difference.
 
 1. With the PS DLL registered, redo **Lab 2.2's surrogate experiment**. It now works: your 32-bit DLL runs in `dllhost.exe` and a 64-bit client talks to it. Confirm with Process Explorer that `dllhost.exe` has loaded your DLL.
 

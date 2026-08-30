@@ -801,7 +801,11 @@ ATL's `CComEnumOnSTL` / `IEnumOnSTLImpl` implement `IEnumVARIANT` over an STL co
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/) — its README is a five-minute wizard recipe that produces exactly the server this lab needs.
 > - **Time:** ~3 h.
 
-Build a `Calculator` with a dual interface, then call it from C++ (early and late bound), PowerShell, VBScript, and C#.
+One component, five callers, no changes to the component. That is the claim Automation makes, and this lab is where you check it.
+
+You build a `Calculator` with a **dual** interface, then call it from C++ (early *and* late bound), PowerShell, VBScript, and C#. Two of those callers use the vtable; three go through `IDispatch` and have never seen your header.
+
+What to take away is not the code — it is which capability each caller depends on. When a customer says "it works in C# but not in VBScript," this lab is how you already know where to look.
 
 ### C++ early bound (`#import`)
 
@@ -927,6 +931,10 @@ Then time 100,000 calls each. Early-bound C++ vs VBScript typically differs by *
 > - **Depends on:** the Lab 5.1 server, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), built with connection points enabled (step 4 of its README).
 > - **Time:** ~2 h.
+
+Connection points build a reference cycle **by construction**: the source holds the sink so it can raise events, and the sink holds the source so it can unsubscribe. Nothing is wrong with either half.
+
+Here you wire one up, remove the `Unadvise`, and watch the trace show that *nothing is ever destroyed* — while the program keeps working perfectly. Then you do the same from PowerShell, because scripting hosts have the identical problem under a different name.
 
 1. Add `_ICalculatorEvents` with `OnCalculated`, implement the connection point, and wire up the C++ sink from §5.7. Confirm the callback fires.
 2. Add the Module 1 ref-count tracing to both the source and the sink.

@@ -477,6 +477,10 @@ Log every run in your notes with: *symptom seen first → tool that localized it
 > - **Starting point:** none — this is a writing deliverable.
 > - **Time:** ~3 h.
 
+Everything in this course has been building toward a document you will actually use at work. This lab is where you write it.
+
+A runbook entry is not a definition of an HRESULT — you can look those up. It is *what you do next*, in order, when that code appears in a ticket: the fastest discriminating check, the tool that answers it, and the fix. Written now, while the labs are fresh and you still remember what each failure looked like.
+
 For each HRESULT below, write a runbook entry with **exactly** these fields:
 
 ```markdown

@@ -243,6 +243,8 @@ HRESULT hr = MakeAndInitialize<Calculator>(&calc, /*precision*/ 4);
 
 Not a COM framework; a set of RAII and error-handling helpers that make COM code dramatically safer. Header-only, from https://github.com/microsoft/wil.
 
+> **Unlike ATL, WRL, and C++/WinRT, WIL is not part of the Windows SDK or Visual Studio.** Add it with vcpkg (`wil`) or the `Microsoft.Windows.ImplementationLibrary` NuGet package before any of the `#include`s below will resolve.
+
 ```cpp
 #include <wil/com.h>
 #include <wil/result.h>
@@ -481,6 +483,10 @@ The source generator emits the marshaling code at compile time — AOT-compatibl
 > - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) for the "before", and [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/)'s README for the "after".
 > - **Time:** ~2 h.
 
+You have written a COM server by hand, so you know exactly what boilerplate a framework has to replace. This lab rebuilds the same component in ATL — which takes a wizard and about ten minutes.
+
+**The server is not the deliverable; the comparison is.** Counting what disappeared, and then stepping into ATL to see where it went, is what stops ATL being a black box the first time it misbehaves.
+
 1. **File → New → Project → ATL Project**, DLL, no attributes.
 2. Add a **Simple Object** (`CCalculator`) via the wizard: choose "Dual" interface, "Both" threading, "Support ISupportErrorInfo", "Support Connection Points".
 3. Add `Add`, `Subtract`, `Describe`, and a `Precision` property through the IDL editor / Add Method wizard.
@@ -520,6 +526,10 @@ Understanding that `CComObject<T>` is the thing actually instantiated (not `T`) 
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), registered.
 > - **Extra machine:** Direction 3 needs a **clean VM or second machine** that does not have the interop assembly deployed — on your dev box the failure will not reproduce.
 > - **Time:** ~3 h.
+
+Module 0's claim was that a client cannot tell which language a server was written in. This lab tests that claim in **both directions** — a C# server called from C++, and a C++ server called from C# three different ways.
+
+It mostly holds, and the interesting part is where it does not: the seams show up in deployment and lifetime, not in the calls themselves.
 
 ### Direction 1: C# server, C++ client
 
@@ -572,6 +582,10 @@ Build the C# client with `<EmbedInteropTypes>false</EmbedInteropTypes>`, deploy 
 > - **Depends on:** a registered `Training.Calculator.1` (Lab 6.1) with the Module 1 ref-count tracing still compiled in.
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), registered, with a `Trace` call added to its `AddRef`/`Release` so you can see when the RCW really releases.
 > - **Time:** ~1 h.
+
+The RCW makes a COM object look like an ordinary .NET object, which is a genuine convenience right up to the moment lifetime matters — and then it is the source of the interop bugs support engineers see most.
+
+This lab reproduces three of them with the Module 1 ref-count trace running, so you can watch the gap between "C# dropped the reference" and "COM `Release` actually fired".
 
 ```csharp
 using System;

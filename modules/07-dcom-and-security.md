@@ -541,6 +541,10 @@ Event 10036, DistributedCOM:
 > - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — a complete EXE server and client. Register [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` **first**.
 > - **Time:** ~3 h.
 
+Everything so far has run inside one process. This lab moves the same component into an EXE of its own, which changes activation from a `LoadLibrary` into a `CreateProcess` performed by the SCM — and makes marshaling mandatory rather than optional.
+
+Two new problems arrive with the process boundary, and the code below solves both: telling the server it was started *by COM* rather than by a user (`-Embedding`), and knowing when it is safe to exit.
+
 ```cpp
 #include <windows.h>
 #include <objbase.h>
@@ -689,6 +693,10 @@ Set-ItemProperty "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Name "AppID" -Value $app
 > - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.8 tells you not to do.
 > - **Time:** ~2 h.
 
+Launch and Access permissions are configured in different places, checked at different times, and confused constantly — including in a great deal of published advice.
+
+Here you break each one deliberately so you learn to tell them apart **from the symptom alone**, before reading any log. Then you find the Event 10016 your own machine just generated and map every field back to what you changed.
+
 1. In `dcomcnfg`, find your Calculator AppID → Properties → Security → **Launch and Activation Permissions** → Customize → Edit. **Remove your user account.**
 2. Run the client. Expect `E_ACCESSDENIED` (`0x80070005`).
 3. Open Event Viewer → Windows Logs → System, filter Source = `DistributedCOM`. Find **your** Event 10016. Read every field and map it to what you changed.
@@ -724,6 +732,10 @@ E_ACCESSDENIED on activation
 > - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on machine B, and [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` registered on **both** machines.
 > - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
 > - **Time:** ~3 h.
+
+Local out-of-proc already works. This lab puts a network in the middle and shows exactly what that adds: an endpoint mapper on port 135, a dynamic port range behind it, a **second** marshaling registration on the client machine, and four permission bits instead of two.
+
+The method is one variable at a time — break a single thing, record the HRESULT and which machine logged it, restore it. "It fails remotely" is not a diagnosis; this lab is how you turn it into one.
 
 1. Register the server on machine B, and the **proxy/stub or type library on both A and B**. (Forgetting the client-side marshaling registration is a classic remote-DCOM failure.)
 2. From machine A, activate with `CoCreateInstanceEx` + `COSERVERINFO`.

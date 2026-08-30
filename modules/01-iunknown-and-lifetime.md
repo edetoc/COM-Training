@@ -422,7 +422,9 @@ In WinDbg: `!error 0x8007007e`. On the command line: `certutil -error 0x8007007e
 
 Or don't write your own — use **WIL**.
 
-> **WIL** — the **Windows Implementation Library**. Microsoft's open-source, header-only C++ helper library for Windows programming: https://github.com/microsoft/wil. It's not a COM framework; it's a collection of RAII wrappers and error-handling macros that make Windows and COM code far harder to get wrong. Nothing to build or link — just add the headers.
+> **WIL** — the **Windows Implementation Library**. Microsoft's open-source, header-only C++ helper library for Windows programming: https://github.com/microsoft/wil. It's not a COM framework; it's a collection of RAII wrappers and error-handling macros that make Windows and COM code far harder to get wrong.
+>
+> **It does not ship with the Windows SDK or Visual Studio** — you add it yourself, via vcpkg (`wil`), the `Microsoft.Windows.ImplementationLibrary` NuGet package, or by dropping the headers into your tree. Once it is there, there is nothing to build or link.
 >
 > Its `RETURN_IF_FAILED` / `THROW_IF_FAILED` do what the macro above does **and** record the originating file, line, and HRESULT. That matters more than it sounds: when a failure bubbles up through ten layers, WIL tells you where it *started* instead of handing you a bare `E_FAIL` from somewhere unknown. Module 6 §6.4 covers it properly; Module 8 uses its logging for diagnostics.
 
@@ -616,13 +618,17 @@ DEFINE_GUID(IID_ICalculator,
 DEFINE_GUID(IID_IAdvancedCalculator,
     0xa1b2c3d4, 0x0002, 0x4000, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02);
 
-struct __declspec(novtable) ICalculator : public IUnknown
+// __declspec(uuid(...)) attaches the GUID to the type, which is what makes
+// __uuidof(ICalculator) work. MIDL does this for you via MIDL_INTERFACE.
+struct __declspec(uuid("A1B2C3D4-0001-4000-9000-000000000001"))
+       __declspec(novtable) ICalculator : public IUnknown
 {
     virtual HRESULT STDMETHODCALLTYPE Add(long a, long b, long* result) = 0;
     virtual HRESULT STDMETHODCALLTYPE Subtract(long a, long b, long* result) = 0;
 };
 
-struct __declspec(novtable) IAdvancedCalculator : public IUnknown
+struct __declspec(uuid("A1B2C3D4-0002-4000-9000-000000000002"))
+       __declspec(novtable) IAdvancedCalculator : public IUnknown
 {
     virtual HRESULT STDMETHODCALLTYPE Divide(long a, long b, long* result) = 0;
 };
@@ -898,14 +904,52 @@ int main()
 ## 1.7 LAB 1.2 — Smart pointers
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ plus the optional component **C++ ATL for latest build tools** (for `CComPtr`). WRL (`wrl/client.h`) ships with the Windows SDK — no extra install.
+> - **Tools:** Visual Studio C++. **Style B only** needs the optional component **C++ ATL for latest build tools** (for `CComPtr`) — Styles A, C and D have no such dependency: `_com_ptr_t` comes with the compiler, and C++/WinRT with the Windows SDK.
 > - **Elevation:** not required.
 > - **Bitness:** x64.
+> - **Language standard:** set the project to **C++20** (Project → Properties → C/C++ → Language). Style D's `winrt/base.h` no longer builds under `/std:c++17` on current toolsets.
 > - **Depends on:** Lab 1.1 — you reuse `Calculator.h` and the `Calculator` implementation.
 > - **Starting point:** [`labs/stage-1-manual-iunknown/`](../labs/stage-1-manual-iunknown/) — open `Lab01.sln` and press F5. Skipped Lab 1.1? Start here.
 > - **Time:** ~1 h.
 
-Manual `Release` is error-prone the moment you have early returns or exceptions. Compare four styles.
+Lab 1.1 released every pointer by hand, and it worked — because that code had exactly one way out. Real functions do not: add an error check, an early `return`, or a call that can throw, and every new exit path has to release everything currently held, or leak.
+
+**In this lab you write the same small function four ways** — once with raw pointers, then with each of the three smart-pointer types you will actually meet in Windows code.
+
+The goal is not to crown a winner. It is to see that all four produce an **identical `AddRef`/`Release` trace**, so you can treat them as the same idea in different spellings — and to recognize each one on sight when you open somebody else's codebase and find `CComPtr` in one file and `winrt::com_ptr` in the next.
+
+### Set-up
+
+Add the four functions below to your Lab 1.1 project (or to the Stage 1 snapshot) and call them one after another from `main`. They all create the object through `CreateCalculator`, so the Lab 1.1 trace prints as they run — which is what you will be comparing.
+
+**Leave Lab 1.1's own functions in the file** — nothing here replaces them. Just comment out their calls for now, or their output buries the four traces you want to read:
+
+```cpp
+int main()
+{
+    // Lab 1.1 - keep the functions, silence them while working through Lab 1.2.
+    // ProveIdentityRule();
+    // ProveSymmetryAndTransitivity();
+    // ProveQIAddRefs();
+    // ShowFailureBehaviour();
+
+    printf("A hr=0x%08X\n", DoWorkRaw());
+    printf("B hr=0x%08X\n", DoWorkATL());
+    printf("C hr=0x%08X\n", DoWorkComPtr());
+    printf("D hr=0x%08X\n", DoWorkCppWinRT());
+    return 0;
+}
+```
+
+Styles B–D use a helper macro so the error checking does not drown the point. **Define it yourself** at the top of the file — nothing extra to install:
+
+```cpp
+#define RETURN_IF_FAILED(expr) do { HRESULT _hr_ = (expr); if (FAILED(_hr_)) return _hr_; } while (0)
+```
+
+The `do { ... } while (0)` is the standard idiom for a multi-statement macro: it makes the expansion a **single statement**, so `RETURN_IF_FAILED(x);` still works as the body of an unbraced `if` without orphaning the `else`. The compiler removes the non-loop entirely.
+
+> You will meet `RETURN_IF_FAILED` constantly in Microsoft's own code, where it comes from **WIL** and does rather more than this — it logs the failure and can break into the debugger. WIL is **not** part of the Windows SDK: it is a separate header-only library (`microsoft/wil` on GitHub, or the `Microsoft.Windows.ImplementationLibrary` package on NuGet/vcpkg), so there is no `#include` you can add without installing it first. You do not need it for this lab; §6.4 covers it properly.
 
 ### Style A — raw pointers with a single exit
 
@@ -971,53 +1015,207 @@ Use `sp.Release()` first, or a fresh variable.
 
 ### Style C — `_com_ptr_t` via `_COM_SMARTPTR_TYPEDEF`
 
+Same idea as `CComPtr`, three different choices:
+
+- **Failures become exceptions** — `_com_error`, rather than an `HRESULT` you check. (Exception: a `QueryInterface` that returns `E_NOINTERFACE` leaves the pointer null instead of throwing.)
+- **`QueryInterface` is implicit.** Assigning one interface pointer to another performs it. ATL keeps that in a separate type, `CComQIPtr`.
+- **`operator&` releases first** rather than asserting. It cannot leak like `CComPtr` can — but it silently drops the reference you were holding.
+
+It also **does not use ATL at all**. `_com_ptr_t` comes from `<comdef.h>`, part of the MSVC compiler's own headers — so it is available on a plain C++ install with no optional components. That is exactly why `#import` generates it: the compiler can count on those headers being there, which it cannot do for ATL. It is why `#import`-based Office automation code is full of it.
+
 ```cpp
 #include <comdef.h>
-_COM_SMARTPTR_TYPEDEF(ICalculator, __uuidof(ICalculator));
-// gives you ICalculatorPtr
+_COM_SMARTPTR_TYPEDEF(ICalculator, IID_ICalculator);                  // -> ICalculatorPtr
+_COM_SMARTPTR_TYPEDEF(IAdvancedCalculator, IID_IAdvancedCalculator);  // -> IAdvancedCalculatorPtr
 
-ICalculatorPtr calc;
-calc.CreateInstance(CLSID_Calculator);   // throws _com_error on failure
-IAdvancedCalculatorPtr adv = calc;       // implicit QueryInterface via operator=
-```
-
-Compact, but throws `_com_error`, which surprises people. Common in `#import`-based Office automation code.
-
-### Style D — `winrt::com_ptr` / `wil::com_ptr`
-
-```cpp
-#include <winrt/base.h>
-
-winrt::com_ptr<ICalculator> calc;
-winrt::check_hresult(CreateCalculator(IID_ICalculator, calc.put_void(), "cppwinrt"));
-
-auto adv = calc.as<IAdvancedCalculator>();   // throws hresult_error on failure
-// or:
-auto advMaybe = calc.try_as<IAdvancedCalculator>();   // returns null com_ptr instead
-```
-
-Note the explicit `put()` / `put_void()` — no `operator&` ambiguity, which eliminates the `CComPtr` trap by design.
-
-### Exercises for Lab 1.2
-
-1. Implement all four styles against your `Calculator`. Add the ref-count trace and confirm all four produce identical `ADDREF`/`RELEASE` sequences.
-2. Introduce an early `return` in the middle of Style A **without** a `goto`. Watch the leak in the trace. Then fix it.
-3. Trigger the `CComPtr::operator&` assert deliberately so you recognize it.
-4. Write a function that returns an interface to its caller as an `[out]` parameter, using `CComPtr` internally. Get the "transfer of ownership at the boundary" right:
-
-```cpp
-HRESULT GetCalculator(ICalculator** ppOut)
+HRESULT DoWorkComPtr()
 {
-    if (!ppOut) return E_POINTER;
-    *ppOut = nullptr;
-    CComPtr<ICalculator> sp;
-    RETURN_IF_FAILED(CreateCalculator(IID_ICalculator, (void**)&sp, "out"));
-    *ppOut = sp.Detach();     // Detach: transfer ownership, no AddRef/Release
+    ICalculatorPtr calc;
+    RETURN_IF_FAILED(CreateCalculator(IID_ICalculator, (void**)&calc, "comptr"));
+
+    long r = 0;
+    RETURN_IF_FAILED(calc->Add(2, 3, &r));
+
+    IAdvancedCalculatorPtr adv = calc;   // implicit QueryInterface via operator=
+    if (!adv) return E_NOINTERFACE;      // it does NOT throw here - it yields null
+    RETURN_IF_FAILED(adv->Divide(10, 2, &r));
+
     return S_OK;
 }
 ```
 
-Using `*ppOut = sp;` instead would `AddRef` and then `sp`'s destructor would `Release` — net correct, but `Detach` states the intent. Using `*ppOut = sp.p;` without `Detach` is a **bug** (returns a pointer that's about to be released).
+From Module 2 onward you will more often see it create the object itself, which is where the
+exceptions come in:
+
+```cpp
+ICalculatorPtr calc;
+calc.CreateInstance(CLSID_Calculator);   // throws _com_error on failure
+```
+
+Compact, but that throwing behaviour surprises people. Very common in `#import`-based Office
+automation code, which is exactly where you will meet it in tickets.
+
+### Style D — `winrt::com_ptr` / `wil::com_ptr`
+
+The modern option, and the one to reach for in new code. `winrt::com_ptr` ships with the **Windows SDK** — no ATL, nothing to download. `wil::com_ptr` is near-identical in shape but comes from WIL, which you install separately (§6.4).
+
+Two things set it apart from B and C:
+
+- **There is no `operator&`.** You write `put()` or `put_void()` instead. That removes `CComPtr`'s assert-on-non-null trap *and* `_com_ptr_t`'s silent-release behaviour, by simply not offering the ambiguous syntax in the first place.
+- **Interfaces are named as types, not values.** `calc.try_as<IAdvancedCalculator>()` instead of an `IID_` constant. This is the modern C++ idiom — and it is the one thing that needs a small change to your header before any of it compiles.
+
+You get both error models: `as<T>()` and `check_hresult()` throw `winrt::hresult_error`, while `try_as<T>()` hands back a null pointer so you can stay on `HRESULT`s.
+
+**First, that one change to `Calculator.h`.**
+
+Every style so far has named an interface by **value**: you hand `IID_ICalculator` to `QueryInterface`, which compares GUIDs at runtime. C++/WinRT names it by **type** instead — `calc.try_as<IAdvancedCalculator>()` mentions no GUID at all, so the library has to obtain one from the type itself, using `__uuidof`. A plain `struct` carries no GUID, and there is nothing for `__uuidof` to find.
+
+`__declspec(uuid("..."))` attaches one to the type. In `Calculator.h`, **edit the two `struct` lines** — that is the whole change. The methods inside stay exactly as they are, and the `DEFINE_GUID` lines stay too:
+
+```cpp
+// before
+struct __declspec(novtable) ICalculator : public IUnknown
+
+// after
+struct __declspec(uuid("A1B2C3D4-0001-4000-9000-000000000001"))
+       __declspec(novtable) ICalculator : public IUnknown
+```
+
+```cpp
+// before
+struct __declspec(novtable) IAdvancedCalculator : public IUnknown
+
+// after
+struct __declspec(uuid("A1B2C3D4-0002-4000-9000-000000000002"))
+       __declspec(novtable) IAdvancedCalculator : public IUnknown
+```
+
+The string must match the GUID in that interface's own `DEFINE_GUID` — they are two spellings of one identifier, and nothing checks that you kept them in step.
+
+**Why keep `DEFINE_GUID` at all?** Because the two do different jobs, and real COM headers carry both:
+
+| | Produces | Used by |
+|---|---|---|
+| `DEFINE_GUID(IID_ICalculator, …)` | a `const GUID` **variable** | your `QueryInterface`'s `riid ==` tests |
+| `__declspec(uuid("…"))` | a GUID attached to the **type** | `__uuidof(T)` — so `try_as<T>`, `CComQIPtr<T>`, `IID_PPV_ARGS` |
+
+This is not a workaround for the lab: it is what MIDL generates for every interface it compiles, via `MIDL_INTERFACE`. Skip it and the compiler tells you what is missing, if not why:
+
+```
+error C2787: 'IAdvancedCalculator': no GUID has been associated with this object
+```
+
+Now the style itself:
+
+```cpp
+#include <unknwn.h>        // MUST come before winrt/base.h for classic COM interfaces
+#include <winrt/base.h>
+
+HRESULT DoWorkCppWinRT()
+{
+    winrt::com_ptr<ICalculator> calc;
+    RETURN_IF_FAILED(CreateCalculator(IID_ICalculator, calc.put_void(), "cppwinrt"));
+
+    long r = 0;
+    RETURN_IF_FAILED(calc->Add(2, 3, &r));
+
+    // as<>() THROWS winrt::hresult_error on failure; try_as<>() returns null instead.
+    auto adv = calc.try_as<IAdvancedCalculator>();
+    if (!adv) return E_NOINTERFACE;
+    RETURN_IF_FAILED(adv->Divide(10, 2, &r));
+
+    return S_OK;
+}
+```
+
+Note the explicit `put()` / `put_void()` — there is no `operator&` at all, which removes the
+`CComPtr` trap above by design. Prefer `try_as` over `as` in code that returns `HRESULT`s, or the
+exception will escape across your COM boundary (which Module 0 §0.7 explains you must never let
+happen).
+
+### What you should see
+
+Call all four from `main`. Each one produces the same trace shape — one `CREATE`, one `ADDREF` for
+the `QueryInterface`, then two `RELEASE`s ending at zero:
+
+```
+[COM] CREATE   obj=0000021C... count=1  (raw)
+[COM] ADDREF   obj=0000021C... count=2  (raw)
+[COM] RELEASE  obj=0000021C... count=1  (raw)
+[COM] RELEASE  obj=0000021C... count=0  (raw)
+[COM] DESTROY  obj=0000021C... count=0  (raw)
+```
+
+Only the tag in brackets changes between the four. **Four spellings, one behaviour** — the smart
+pointers are not doing anything your `goto Cleanup` did not; they are just doing it somewhere you
+cannot forget to.
+
+### Exercises for Lab 1.2
+
+1. Implement all four and confirm the traces match, tag aside. If one differs, you have found a
+   real bug — work out which reference is unbalanced before moving on.
+2. **Remove one `goto` and watch Style A leak.** In `DoWorkRaw`, turn the third exit into a
+   bare `return` — that one matters because `pCalc` is already live by then:
+
+   ```cpp
+   hr = pCalc->QueryInterface(IID_IAdvancedCalculator, (void**)&pAdv);
+   if (FAILED(hr)) return hr;          // was: goto Cleanup;
+   ```
+
+   That branch only runs on failure, so force it: ask for an interface the object does not
+   implement, `IID_IClassFactory`. Run it and read the trace — you get a `CREATE` with **no
+   matching `DESTROY`**, and the count stranded at 1.
+
+   Now make the same edit in Style B: return early from wherever you like, and nothing leaks.
+   That is the whole argument for smart pointers: **Style A stays correct only while you — and
+   everyone who edits the function after you — release on every path. B–D have nothing to
+   remember.**
+
+3. **Assign into the same `CComPtr` twice, and watch ATL stop you.** Writing `&sp` calls
+   `CComPtr::operator&`, which fires an **assertion** — a debug-only check that halts the program
+   with a dialog — if that pointer already holds a reference. Do it on purpose, so you recognize
+   it when it happens for real:
+
+   ```cpp
+   CComPtr<ICalculator> sp;
+   CreateCalculator(IID_ICalculator, (void**)&sp, "trap");
+   CreateCalculator(IID_ICalculator, (void**)&sp, "trap");   // <-- asserts here
+   ```
+
+   You get an ATL assertion pointing into `atlcomcli.h`. The reason: `&sp` hands out the address of
+   a pointer that **already holds a reference**, so writing through it would overwrite that
+   reference and leak the object.
+
+   Then **switch to a Release build and run it again.** `ATLASSERT` compiles to nothing, the dialog
+   disappears, and you are left with a silent leak. A debug build that stops dead and a release
+   build that quietly leaks, from identical source — that is where "it only leaks in production"
+   tickets come from.
+
+4. **Get ownership transfer right at an `[out]` boundary.** Write this, call it from `main`, release
+   the pointer it gives you, and confirm the trace reaches `DESTROY` only *after* your release:
+
+   ```cpp
+   HRESULT GetCalculator(ICalculator** ppOut)
+   {
+       if (!ppOut) return E_POINTER;
+       *ppOut = nullptr;
+       CComPtr<ICalculator> sp;
+       RETURN_IF_FAILED(CreateCalculator(IID_ICalculator, (void**)&sp, "out"));
+       *ppOut = sp.Detach();     // Detach: hand the reference over, no AddRef/Release
+       return S_OK;
+   }
+   ```
+
+   Now try both variants, and **predict the trace before running each**:
+
+   | Variant | What happens |
+   |---|---|
+   | `*ppOut = sp;` | `AddRef`s, then `sp`'s destructor `Release`s. Net correct — but it says nothing about intent, and costs a pointless pair of calls. |
+   | `*ppOut = sp.p;` | No `AddRef`. `sp`'s destructor then releases the **only** reference, so your caller receives a dangling pointer. The trace shows `DESTROY` before the caller has touched it. |
+
+   `Detach()` is the one that states what is actually happening: the reference leaves the smart
+   pointer and becomes the caller's obligation. That is the rule from §1.4 at a function boundary —
+   whoever receives an `[out]` interface pointer owes the `Release`.
 
 ---
 

@@ -971,6 +971,10 @@ Tearing down an STA while other apartments hold proxies to its objects yields `R
 > - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/). Change `ThreadingModel` from `"Both"` to `"Apartment"` in `DllRegisterServer`, rebuild, and re-register.
 > - **Time:** ~90 min.
 
+§3.5 claims a raw interface pointer cannot legally cross an apartment boundary. This lab proves it: the same object, called three different ways from a second thread, with only the marshaled route behaving correctly.
+
+The payoff is in the exercises, where you print both pointers and *see* the proxy — a different address for the same object.
+
 Build a console app. Use the `Calculator` object from Module 1 (in-proc, `ThreadingModel = Apartment` so COM enforces STA rules).
 
 ```cpp
