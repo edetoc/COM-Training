@@ -1221,7 +1221,9 @@ cannot forget to.
 
 ## 1.8 Reference cycles
 
-Reference counting cannot collect cycles.
+Everything so far has assumed that if everyone releases what they own, the object dies. There is one shape where that is simply false — and no amount of correct `Release` calls will rescue you from it.
+
+A **cycle** is two objects holding references to *each other*. A parent holds its child, and the child holds its parent back. Both of those are **strong** references — meaning each one was `AddRef`'d, so it keeps its target alive and owes a `Release`. Every reference you have used so far has been strong. Now let go of both from the outside:
 
 ```
    Parent ──strong──► Child
@@ -1229,11 +1231,15 @@ Reference counting cannot collect cycles.
       └────strong───────┘        Neither ever reaches 0.
 ```
 
+Each object is still being held — by the other one. Neither count can reach zero, so neither destructor runs, so neither ever releases the other. They keep each other alive for the life of the process.
+
+And COM cannot detect this. `Release` only ever looks at **one** object's count, and here both counts are perfectly legitimate non-zero numbers. Nothing in the system stands far enough back to notice that the only thing keeping each object alive is the other one. (A garbage collector *does* stand that far back, which is exactly why .NET can collect cycles and COM cannot.)
+
 Real examples:
 
 - A document holds its views; each view holds the document.
-- **Connection points**: a source `Advise`s a sink, holding a strong reference to it; the sink holds the source so it can `Unadvise`. If you forget `Unadvise`, both leak forever. (Module 5.)
-- .NET RCW/CCW cycles across the interop boundary — the GC cannot see through COM ref counts.
+- **Event subscriptions.** An object that raises events holds a reference to every subscriber, so it can call them back; each subscriber holds the object, so it can unsubscribe later. Forget to unsubscribe and neither side can ever die. COM's mechanism for this is called *connection points*, and Module 5 builds one — it is the single most common COM leak in the wild.
+- **.NET interop.** When managed and native objects hold each other, neither side's cleanup can see the whole loop: .NET's garbage collector cannot follow a COM reference count, and COM cannot see into the GC heap. Module 6.
 
 **Solutions:**
 
@@ -1242,7 +1248,7 @@ Real examples:
 | Weak back-pointer | Child stores a raw `Parent*` without `AddRef`. Parent must outlive child by construction. |
 | Explicit teardown | Parent calls `child->SetParent(nullptr)` before releasing. `IOleObject::SetClientSite(nullptr)` and `IObjectWithSite::SetSite(nullptr)` exist for exactly this. |
 | `IWeakReference` | WinRT: `IWeakReferenceSource::GetWeakReference`, then `Resolve` when you need it. |
-| Always `Unadvise` | Pair every `Advise` with an `Unadvise`, ideally with RAII. |
+| Always unsubscribe | Every event subscription has to be undone. In COM that means pairing each `Advise` (subscribe) with an `Unadvise` (unsubscribe) — Module 5 — ideally through RAII so it cannot be skipped on an early return. |
 
 **Support signal:** a process whose private bytes grow monotonically, with a matching growth in a single object type, and which *never* shrinks even at idle → suspect a cycle or a missing `Release`, not a heap fragmentation issue.
 
@@ -1297,9 +1303,23 @@ Enable **Basics → COM** in Application Verifier for your EXE. It catches:
 - releasing an interface more times than acquired (in many cases),
 - `CoUninitialize` while objects are still alive.
 
-Combine with **Basics → Heaps (page heap)** so a use-after-free faults *at the moment of use*, not later.
+Combine with **Basics → Heaps**, which turns on **page heap**.
+
+> **Page heap** changes how the heap manager hands out memory: every allocation gets its own page with an inaccessible guard page next to it, and freed pages are left inaccessible rather than recycled. Two things follow, and both are exactly what you need here:
+>
+> - A **use-after-free faults immediately, at the bad read**, instead of quietly succeeding because the memory happened to still be there — which is what turns an over-release from "a crash somewhere, sometime" into a stack trace pointing at the culprit.
+> - Each block keeps its **allocation and free call stacks**, which is what lets `!heap -p -a <ptr>` later tell you *who released it*.
+>
+> The cost is memory and speed, so it is a diagnostic setting, not something you leave on. Enable it per-executable from Application Verifier, or with `gflags /p /enable YourApp.exe /full`, and **turn it off afterwards** (`gflags /p /disable YourApp.exe`). Module 8 §8.6 goes further with it.
 
 ### Technique 4 — recognize the two symptom families
+
+Almost every reference-counting bug lands in one of two families, and they look nothing alike:
+
+- **The count never reaches zero — a leak.** The object is never destroyed. Nothing fails: the program behaves correctly and simply consumes memory, handles, and sometimes a whole server process that refuses to exit. You find this one by *counting*, not by watching it break.
+- **The count reaches zero too early — an over-release.** The object is destroyed while somebody still holds a pointer to it, so every later use of that pointer reads freed memory. This one does break — but almost never at the line responsible, and often not on the same thread or in the same minute.
+
+That difference is what makes triage possible: the first family is a graph that only goes up, the second is a crash with no stable location. Once you know which family you are in, the tool you reach for is already decided.
 
 | Symptom | Almost certainly |
 |---|---|
