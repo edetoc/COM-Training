@@ -1,8 +1,10 @@
 # Module 3 — Threading and apartments
 
-**Time: 1.5 weeks. This is the hardest module, and the source of the worst production bugs.**
+Modules 1 and 2 assumed one thread. Reality has many. This module explains COM's threading model — why it exists, what it guarantees, and the precise ways it fails. **It is the hardest module in the course, and the source of the worst production bugs.**
 
-Modules 1 and 2 assumed one thread. Reality has many. This module explains COM's threading model — why it exists, what it guarantees, and the precise ways it fails.
+**What this module covers**
+
+Apartments — the STA, the MTA, and the neutral apartment — what `ThreadingModel` actually decides, and how to find out which apartment a thread really joined. Then the two things that break: passing a raw interface pointer across a boundary, with the four safe ways to move one, and reentrancy, where an STA runs other people's code in the middle of your method. It closes with `IMessageFilter` and four deadlock patterns, each shown as it appears in a debugger.
 
 **Contents**
 

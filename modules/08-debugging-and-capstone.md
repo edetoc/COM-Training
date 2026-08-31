@@ -1,8 +1,10 @@
 # Module 8 — Debugging, diagnostics, and the capstone
 
-**Time: ongoing. This module turns knowledge into diagnostic reflexes.**
-
 Modules 1–7 taught you how COM works and how it breaks. This one is about **evidence**: what to collect, which tool answers which question, and how to reason from a dump you didn't produce, for code you don't have, on a machine you can't touch.
+
+**What this module covers**
+
+An evidence hierarchy that decides what to collect and in what order, then the tools aimed squarely at COM: decoding any `HRESULT` by hand, Process Monitor, WinDbg, ETW, Application Verifier and page heap. It works one leak through from dump to root cause, gives you a triage flowchart covering every failure in the course, and ends with a capstone where you build a component, break it deliberately, and document what each break looked like.
 
 **Contents**
 

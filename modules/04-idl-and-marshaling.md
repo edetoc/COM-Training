@@ -1,8 +1,10 @@
 # Module 4 — Interfaces, IDL, MIDL, and marshaling
 
-**Time: 1 week.**
-
 Module 3 showed that crossing an apartment boundary requires a proxy. This module explains where proxies come from, how COM knows how to package your parameters, and who owns the memory.
+
+**What this module covers**
+
+Why a C++ header cannot describe an interface completely, and what IDL adds: parameter direction, array sizes, pointer semantics, and the memory-ownership rules that settle who allocates and who frees. You run MIDL and read everything it generates, meet the three kinds of marshaling and see when COM picks each, and learn the one versioning rule you must never break — plus how to read an NDR failure when the wire format and the code no longer agree.
 
 **Contents**
 

@@ -1,6 +1,10 @@
 # Module 0 — Why COM Exists
 
-**Time: half a day. No coding yet.**
+Before any API, one question: why does COM exist at all? The answer is a specific, concrete problem with C++ — one you can watch happen — and everything else in this course is a consequence of solving it.
+
+**What this module covers**
+
+Four demonstrations of why a C++ class cannot safely cross a binary boundary, followed by COM's answer to it — the three pillars of immutable interfaces, reference counting, and location transparency. Along the way you pick up the vocabulary the rest of the course assumes, take apart a working COM call three lines long, and see where COM still runs in Windows today. There is no code to write here.
 
 **Contents**
 

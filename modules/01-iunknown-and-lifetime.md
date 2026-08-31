@@ -1,8 +1,10 @@
 # Module 1 — `IUnknown`, vtables, and lifetime
 
-**Time: 1 week. This is the most important module in the course.**
+**This is the most important module in the course.** If you understand it completely, you can reason about 70% of real COM bugs. If you skim it, everything later will feel like arbitrary rules.
 
-If you understand this module completely, you can reason about 70% of real COM bugs. If you skim it, everything later will feel like arbitrary rules.
+**What this module covers**
+
+What an interface pointer actually is in memory, the three methods every COM object has, and the four `QueryInterface` rules that give an object a stable identity. Then the part responsible for most real bugs: who owes a `Release`, what breaks when the count is wrong in either direction, how to read an `HRESULT` properly, and why reference cycles cannot be broken by counting alone. It closes with how to track a lifetime bug down from a trace, a breakpoint, or a dump.
 
 **Contents**
 

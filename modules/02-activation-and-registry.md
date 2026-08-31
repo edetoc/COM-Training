@@ -1,8 +1,10 @@
 # Module 2 — Activation, registration, and the registry
 
-**Time: 1 week. This module generates the single largest category of support tickets.**
+In Module 1 you called `CreateCalculator` — a plain C++ function. Real clients don't do that; they know only a GUID. This module explains how a GUID becomes a running object, and every way that can fail. **It generates the single largest category of COM support tickets.**
 
-In Module 1 you called `CreateCalculator` — a plain C++ function. Real clients don't do that; they know only a GUID. This module explains how a GUID becomes a running object, and every way that can fail.
+**What this module covers**
+
+The full path from `CoCreateInstance` to a live object: which registry keys COM reads, in what order, and how WOW64 redirection quietly turns a working component into "class not registered". You build a real in-proc server — class factory, DLL exports, self-registration — then do it again with no registry at all, using manifests. It ends with server lifetime rules and a triage table for the activation `HRESULT`s you will actually be handed.
 
 **Contents**
 

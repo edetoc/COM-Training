@@ -1,8 +1,10 @@
 # Module 5 — Automation, `IDispatch`, and scripting
 
-**Time: 1 week.**
+Everything so far assumed a compiled client that knows the vtable at build time. But VBScript, JScript, PowerShell, VBA, and old VB have no vtables and no headers. They discover methods **at runtime, by name**. This module explains how, and covers the family of technologies built on top.
 
-Everything so far assumed a compiled client that knows the vtable at build time. But VBScript, JScript, PowerShell, VBA, and old VB have no vtables and no headers. They discover methods **at runtime, by name**. This module explains how, and covers the family of technologies built on top: type libraries, events, enumerators, and rich error reporting.
+**What this module covers**
+
+How a language with no headers and no vtables calls a COM object at all: `IDispatch`, binding by name at runtime, and dual interfaces that serve both kinds of caller from one object. It covers the Automation type system — `VARIANT`, `BSTR`, `SAFEARRAY` — type libraries and what reads them, rich errors that reach a script as a message rather than a number, connection points and the leak built into them, and how `For Each` actually works.
 
 **Contents**
 

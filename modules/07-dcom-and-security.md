@@ -1,8 +1,10 @@
 # Module 7 — DCOM, security, and out-of-proc servers
 
-**Time: 1 week. This module is the core of the support-engineer track.**
+Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here. **This module is the core of the support-engineer track.**
 
-Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here.
+**What this module covers**
+
+What changes once an object lives in another process: the AppID and the process-wide settings that hang off it, session 0 isolation, and the authentication and impersonation levels set by `CoInitializeSecurity`. Then the security decisions themselves — UAC and integrity levels, Launch versus Access permissions and how to tell them apart from the symptom alone, and Event 10016 read correctly, including when *not* to act on it. It finishes with remote DCOM: the ports, the endpoint mapper, and the failures that only appear across a network.
 
 > **DCOM** stands for **Distributed COM**. It is not a separate technology you opt into — it is the same COM from Modules 1–6, with the proxy/stub plumbing of Modules 3 and 4 carried over a **network transport** (Microsoft RPC) instead of staying inside one process. Your client code does not change at all: still `CoCreateInstance`, still `QueryInterface`, still the same interfaces. That is Module 0's third pillar, location transparency, cashed in.
 >

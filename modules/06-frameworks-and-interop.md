@@ -1,8 +1,10 @@
 # Module 6 — Frameworks: ATL, WRL, WIL, and .NET interop
 
-**Time: 1 week.**
-
 Modules 1–5 built everything by hand so you'd understand the machinery. Nobody writes production COM that way. This module covers the frameworks that remove the boilerplate — and, more importantly, what each one is doing underneath so you can debug it.
+
+**What this module covers**
+
+What ATL's macros actually generate and how to step into them, alongside WRL, WIL, and C++/WinRT for classic COM work. Then .NET interop — the RCW, the CCW, and `ComWrappers` — and the lifetime bugs that interop reliably produces, with guidance on choosing a framework and what each choice costs you.
 
 **Contents**
 
