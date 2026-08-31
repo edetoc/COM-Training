@@ -1483,7 +1483,7 @@ Every one of these is the same misunderstanding:
 
 **You own nothing** from: an `[in]` parameter, a plain pointer assignment, or a raw copy out of a member — and releasing any of them is theft from whoever does own it.
 
-Copy those two lists into your `COM-Notes.md` now. Practically every ref-counting ticket you will ever be handed is one of these eight shapes.
+Practically every ref-counting ticket you will ever be handed is one of these eight shapes.
 
 ### Optional — now find one without reading it
 
@@ -1502,7 +1502,13 @@ Snippets 1 and 3 are the instructive ones here: nothing fails, nothing crashes, 
 1. You already hold an `ICalculator*`. You call `QueryInterface(IID_ICalculator, ...)` on it and get back a pointer with the **same address** you started with — no new object, no new pointer value. Why must the reference count still go up?
 2. An object implements `IFoo` and `IBar` via multiple inheritance. Why is `pFoo == pBar` false, and how do you *correctly* test whether they're the same object?
 3. What does `S_FALSE` mean? Name two APIs that return it, and describe the bug caused by testing `hr == S_OK`.
-4. `Release` does `delete this` and then `return n;`. Why is returning `n` safe but returning `m_cRef` a bug?
+4. `Release` ends like this. Why is returning `n` correct, when returning `m_cRef` instead would be a bug?
+
+   ```cpp
+   ULONG n = InterlockedDecrement(&m_cRef);
+   if (n == 0) delete this;
+   return n;                    // <- why not: return m_cRef;
+   ```
 5. You call `IEnumUnknown::Next(10, rgUnk, &fetched)` and it returns `S_FALSE` with `fetched == 4`. How many `Release` calls do you owe, and on what?
 6. Your process leaks 4 KB/second. `Release` is called correctly everywhere you can see. What's the next hypothesis and how do you test it?
 7. Decode `0x8007000E` and `0x80004002` **by hand** — no lookup table, no `net helpmsg`, no search engine. For each one give: severity, facility, the 16-bit code, and the symbolic name.
