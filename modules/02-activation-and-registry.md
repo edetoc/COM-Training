@@ -89,7 +89,7 @@ HKCR\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}
 - Both present? The **third parameter of `CoCreateInstance`** decides — the `CLSCTX` flags (§2.4). They say which kinds of server the client is willing to accept, and COM tries them in its own fixed preference order: in-proc before local, local before remote.
 - **`ThreadingModel`** → which **apartment** the object is allowed to live in.
 
-> **An apartment** is COM's thread-safety boundary: a group of threads that are permitted to call an object **directly**. A thread outside the object's apartment may not use a raw pointer to it at all — its calls have to be packaged up and handed across, which is **marshaling**. Two rules of thumb carry you through this module: an object is only ever in one apartment, and "different apartment" costs you the same kind of boundary crossing as "different process." Module 3 is devoted to this and `ThreadingModel` is its central knob — set it to `"Both"` for now.
+> **An apartment** is COM's thread-safety boundary: a group of threads that are permitted to call an object **directly**. A thread outside the object's apartment may not use a raw pointer to it at all — its calls have to be packaged up and handed across, which is **marshaling**. Two facts carry you through this module: **every object belongs to exactly one apartment**, and **an apartment boundary is as real as a process boundary** — COM makes a call cross both the same way. Module 3 is devoted to this, and `ThreadingModel` is its central knob; set it to `"Both"` for now.
 
 ### The ProgID keys — the human-readable alias
 
@@ -105,6 +105,23 @@ HKCR\MyCompany.Calculator          <- version independent
 ```
 
 `CLSIDFromProgID(L"MyCompany.Calculator.1", &clsid)` walks exactly these keys. That's all `New-Object -ComObject MyCompany.Calculator` does before calling `CoCreateInstance`.
+
+#### Which should a client use?
+
+Both routes end at the same `CoCreateInstance`. The difference is who performs the lookup, and what can go wrong on the way.
+
+| Reach for the **CLSID** when | Reach for the **ProgID** when |
+|---|---|
+| You are compiled code and can embed a GUID | The caller cannot hold a GUID comfortably — scripts, config files, anything a human types |
+| You need certainty about *which* class you get | You want whichever version is currently installed |
+| You would rather have one less lookup and one less failure mode | Readability matters more than precision |
+
+Two consequences worth carrying forward:
+
+- **A ProgID is an alias, not an identity.** It is a string somebody chose, and nothing enforces uniqueness. The CLSID is the identity. And since `HKCU` wins over `HKLM` (Support fact #1), a per-user registration can quietly point a well-known ProgID at a different class altogether.
+- **A ProgID adds a failure mode that CLSID activation cannot have:** `CO_E_CLASSSTRING` (`0x800401F3`), when the name is not registered or its `CLSID` subkey is missing. So if a script fails and a C++ client using the raw CLSID succeeds, the ProgID keys are the problem — not the component.
+
+The two ProgID forms differ the same way. `MyCompany.Calculator.1` pins a version; `MyCompany.Calculator` follows `CurVer` to whatever is current. The version-independent form is what scripts normally use, and it is also why installing an upgrade can silently change which class a script gets.
 
 ### The Interface key — how a call crosses a boundary
 
@@ -134,11 +151,29 @@ HKCR\AppID\{APPID}
     AuthenticationLevel = dword
 ```
 
-Module 7 covers these. For now, note that AppID is *per-process*, while CLSID is *per-class*.
+Module 7 covers these settings properly. What matters now is **why they live on a separate key at all**.
+
+A CLSID identifies **one class**: which DLL or EXE implements it, and which threading model it wants. But the values above are not properties of a class — they are properties of a **process**. "Run as `LocalService`" or "require this authentication level" cannot sensibly be answered per class, because one EXE can implement a dozen classes and they all share its process, its identity, and its security.
+
+So COM splits the two:
+
+```
+HKCR\CLSID\{CLSID-A}   AppID = {APPID}      \
+HKCR\CLSID\{CLSID-B}   AppID = {APPID}       >  three classes, one process
+HKCR\CLSID\{CLSID-C}   AppID = {APPID}      /
+
+HKCR\AppID\{APPID}     RunAs, permissions, authentication level
+```
+
+Each CLSID names its AppID with a value on its own key, and every class pointing at that AppID shares one set of process-wide settings.
+
+Two practical consequences: an in-proc DLL usually has **no** AppID, because it has no process of its own — it runs in the client's. And when you change a permission in `dcomcnfg`, you are editing the **AppID**, so the change applies to every class that server implements, not just the one you were debugging.
 
 ### The TypeLib key — the machine-readable description of the interfaces
 
 A **type library** ("typelib") is a *compiled, binary description* of a component: its coclasses, interfaces, methods, parameter types, and enums. It is the same information a C++ header or an IDL file carries, but in a form **any language can read at runtime** rather than only a C++ compiler at build time.
+
+It is *generated from* the IDL, not written by hand: MIDL compiles one `.idl` into headers, proxy/stub code, and the `.tlb` together (Module 4). Only the part of the IDL inside its `library { }` block ends up in the typelib.
 
 It is usually **embedded as a resource inside the DLL or EXE itself** — which is why the path below points at `Calc.dll` rather than a separate file — though it can also ship as a standalone `.tlb`.
 
@@ -180,17 +215,26 @@ Consequences you must internalize:
 
 **Diagnostic reflex:** when you see `0x80040154 REGDB_E_CLASSNOTREG`, question #1 is *"what bitness is the client, and what bitness is the server?"* — before you look at anything else.
 
-Check bitness of a DLL:
+Check bitness of a DLL — from a **Developer PowerShell for VS** (`dumpbin` is not on the default `PATH`):
 
-```powershell
-# Quick machine-type check
-$bytes = [IO.File]::ReadAllBytes("C:\Components\Calc.dll")
-$peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-$machine  = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-switch ($machine) { 0x014c {"x86"} 0x8664 {"x64"} 0xAA64 {"ARM64"} default {"0x{0:X}" -f $machine} }
+```
+dumpbin /headers Calc.dll | findstr machine
 ```
 
-Or just `dumpbin /headers Calc.dll | findstr machine`.
+For a 64-bit build:
+
+```
+            8664 machine (x64)
+```
+
+For a 32-bit build:
+
+```
+             14C machine (x86)
+                   32 bit word machine
+```
+
+`8664` = x64, `14C` = x86, `AA64` = ARM64. The second line on the 32-bit output comes from the file characteristics, not the machine type — ignore it and read the `machine (...)` value.
 
 ---
 

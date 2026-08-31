@@ -4,7 +4,7 @@ Module 3 showed that crossing an apartment boundary requires a proxy. This modul
 
 **What this module covers**
 
-Why a C++ header cannot describe an interface completely, and what IDL adds: parameter direction, array sizes, pointer semantics, and the memory-ownership rules that settle who allocates and who frees. You run MIDL and read everything it generates, meet the three kinds of marshaling and see when COM picks each, and learn the one versioning rule you must never break — plus how to read an NDR failure when the wire format and the code no longer agree.
+Why a C++ header cannot describe an interface completely, and what IDL adds: parameter direction, array sizes, pointer semantics, and the memory-ownership rules that settle who allocates and who frees. You run MIDL and read everything it generates — including the type library, decompiled back into IDL, to see which parts of your interface a scripting language can and cannot reach. Then the three kinds of marshaling and when COM picks each, the one versioning rule you must never break, and how to read an NDR failure when the wire format and the code no longer agree.
 
 **Contents**
 
@@ -338,7 +338,7 @@ This is also the reason **Lab 2.2's surrogate experiment failed**. Go back and f
 ## 4.6 LAB 4.1 — Author IDL, compile with MIDL, read the output
 
 > **Requirements**
-> - **Tools:** a **Developer PowerShell for VS** or *x64 Native Tools Command Prompt* — this is what puts `midl.exe` on `PATH`. A plain PowerShell window will fail with "midl is not recognized." Plus `New-Guid` or `guidgen.exe`.
+> - **Tools:** a **Developer PowerShell for VS** or *x64 Native Tools Command Prompt* — this is what puts `midl.exe` on `PATH`. A plain PowerShell window will fail with "midl is not recognized." Plus `New-Guid` or `guidgen.exe`, and **OleView.NET** for step 4.
 > - **Elevation:** not required — this lab only compiles.
 > - **Bitness:** `/env x64`, matching your build.
 > - **Depends on:** the IDL from §4.2. Generate **real** GUIDs; do not reuse the placeholders.
@@ -409,7 +409,20 @@ The `-1` entries mean "use the generic NDR forwarder with this method's format s
 
 **`dlldata.c`** — provides `DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`, `DllUnregisterServer` for the proxy/stub DLL itself. A proxy/stub DLL is just an ordinary COM in-proc server whose objects happen to be proxies.
 
-### Step 4 — build and register the proxy/stub DLL
+### Step 4 — read the type library, and see what got left out
+
+Four of MIDL's outputs are for the C++ toolchain. `Calculator.tlb` is the one **everybody else** reads — scripting engines, `#import`, `tlbimp`, VBA's object browser (Modules 5 and 6). It is worth ten minutes now.
+
+Open it in **OleView.NET** (File → Open Type Library), which decompiles it back into IDL-like text. Put that next to the `Calculator.idl` you wrote and compare:
+
+1. **Find what survived.** The `library TrainingCalcLib` block, the `coclass Calculator`, and `ICalculator` with its methods.
+2. **Find what did not.** Anything outside the `library { }` block never reaches the typelib — a typelib is a *subset* of your IDL, not a translation of it.
+3. **Look at how the parameter types are described.** `[out, retval] LONG*` becomes a return value, which is why PowerShell can write `$calc.Add(2,3)` and get a number rather than an `HRESULT`. That single detail is most of Module 5.
+4. **Try `Checksum`.** Its `[in, size_is(cb)] const BYTE*` has no Automation equivalent. This is the concrete reason `[oleautomation]` exists, and you will hit it as a hard error in Lab 4.2.
+
+> **This is a support skill, not just a lab step.** A registered type library lets you read a third-party component's entire interface surface with **no source and no documentation** — which is often exactly the position you are in on a ticket.
+
+### Step 5 — build and register the proxy/stub DLL
 
 Create a DLL project with `Calculator_p.c`, `dlldata.c`, `Calculator_i.c`, and:
 
