@@ -40,6 +40,10 @@ Two GUIDs appear in that single call, and they answer completely different quest
 | `CLSID_Calculator` | **CLSID** — class ID | *Which component do I want created?* |
 | `IID_ICalculator` | **IID** — interface ID (Module 1) | *Which of its interfaces do I want back?* |
 
+> The thing a CLSID names is a **coclass** — short for *component object class*. It is a concrete, creatable class that implements one or more interfaces: `Calculator` is the coclass, `ICalculator` and `IAdvancedCalculator` are interfaces it implements. Interfaces declare what can be called; a coclass is the actual implementation behind them, and the only kind of thing `CoCreateInstance` can create.
+>
+> The distinction matters because clients name the two separately, and for opposite reasons. You ask for a **coclass** by CLSID because you want *that vendor's* implementation; you ask for an **interface** by IID because you want a *set of methods* and do not care who implements it. One coclass can implement many interfaces, and many coclasses can implement the same interface.
+
 Only the first one drives activation. The IID matters afterwards, once an object exists.
 
 So Windows must answer: *given the CLSID and nothing else — 128 bits, no path, no filename, no hint — which file on this machine holds that class's code, and how do I get it running?*
@@ -240,6 +244,21 @@ For a 32-bit build:
 
 ## 2.4 The activation call chain
 
+`CoCreateInstance` is **the** function that creates COM objects. It is the one you will call in almost every client, and the one at the bottom of most activation failures you will be asked to diagnose. You hand it a CLSID and an IID; it hands you back an interface pointer to a brand-new object:
+
+```cpp
+HRESULT CoCreateInstance(
+    REFCLSID  rclsid,      // which class to create        (§2.1)
+    IUnknown* pUnkOuter,   // aggregation; nullptr normally (§2.5)
+    DWORD     dwClsCtx,    // which kinds of server I accept — CLSCTX (below)
+    REFIID    riid,        // which interface I want back   (§2.1)
+    void**    ppv);        // out: the interface pointer
+```
+
+Two things to note before going further. It returns an `HRESULT`, never the pointer — so `S_OK` is the only proof `ppv` is valid. And the object comes back **already `AddRef`'d**, so you own that reference and must `Release` it (Module 1, Rule 1).
+
+What that one line sets in motion is the rest of this section:
+
 ```
 Client: CoCreateInstance(CLSID, pUnkOuter, CLSCTX, IID, &pv)
    │
@@ -259,17 +278,58 @@ Client: CoCreateInstance(CLSID, pUnkOuter, CLSCTX, IID, &pv)
           └─► pCF->Release()
 ```
 
-Two calls are happening. This matters: if you create many objects of the same class, calling `CoGetClassObject` once and reusing the `IClassFactory` is significantly faster than N `CoCreateInstance` calls.
+**The class factory is always involved, even when you never mention it.** There is no way to create a COM object without one. `CoCreateInstance` simply fetches the factory, uses it once, and throws it away before returning to you. You write one line; COM makes two calls on your behalf.
+
+`CoCreateInstance` is, in essence, this:
+
+```cpp
+// What CoCreateInstance does for you, simplified
+HRESULT CoCreateInstance(REFCLSID rclsid, IUnknown* pUnkOuter,
+                         DWORD dwClsCtx, REFIID riid, void** ppv)
+{
+    IClassFactory* pCF = nullptr;
+    HRESULT hr = CoGetClassObject(rclsid, dwClsCtx, nullptr,
+                                  IID_IClassFactory, (void**)&pCF);   // 1. find the factory
+    if (FAILED(hr)) return hr;
+
+    hr = pCF->CreateInstance(pUnkOuter, riid, ppv);                   // 2. make the object
+    pCF->Release();                                                   // 3. discard the factory
+    return hr;
+}
+```
+
+So the two halves are:
+
+| # | Call | What it does | Cost |
+|---|---|---|---|
+| 1 | `CoGetClassObject` | Find and load the **server**, and get its **class object** (the factory) | Expensive — registry lookup, `LoadLibrary` or `CreateProcess` |
+| 2 | `IClassFactory::CreateInstance` | Ask that factory for **one instance** | Cheap — usually just a `new` |
+
+Only step 2 produces the object you asked for. Step 1 is setup — and notice that `CoCreateInstance` **releases the factory on the way out**, so the next call starts from scratch.
+
+That is the whole reason the split is worth knowing. If you need many objects of the same class, call `CoGetClassObject` yourself, **keep** the `IClassFactory`, and call `CreateInstance` N times. Calling `CoCreateInstance` in a loop repeats the expensive half on every iteration:
+
+```cpp
+// N objects, one lookup
+CComPtr<IClassFactory> spCF;
+CoGetClassObject(CLSID_Calculator, CLSCTX_INPROC_SERVER, nullptr, IID_PPV_ARGS(&spCF));
+for (int i = 0; i < 1000; ++i) {
+    CComPtr<ICalculator> spCalc;
+    spCF->CreateInstance(nullptr, IID_PPV_ARGS(&spCalc));   // no registry, no LoadLibrary
+}
+```
+
+> For one or two objects, use `CoCreateInstance` — that is what it is for. The factory route is for loops, and for the cases in §2.5 where you need to talk to the factory itself.
 
 ### `CLSCTX` flags
 
-This is the **third parameter** of `CoCreateInstance` (and of `CoGetClassObject`) — the `CLSCTX_INPROC_SERVER` in the very first example of this module. It is a **bitmask of the server kinds you will accept**, not a single choice:
+This is the **third parameter** of `CoCreateInstance` (and of `CoGetClassObject`) — the `CLSCTX_INPROC_SERVER` in the very first example of this module. It is a **bitmask of the server kinds your client code is willing to accept**, not a single choice. You are not selecting how the object is built; you are telling COM which of the possibilities it finds in the registry it is allowed to use:
 
 | Flag | Meaning |
 |---|---|
-| `CLSCTX_INPROC_SERVER` | DLL in my process |
+| `CLSCTX_INPROC_SERVER` | A DLL, loaded into my own process |
 | `CLSCTX_INPROC_HANDLER` | In-proc handler (rare; `InprocHandler32`) |
-| `CLSCTX_LOCAL_SERVER` | EXE on this machine |
+| `CLSCTX_LOCAL_SERVER` | An EXE, in its own process on this machine |
 | `CLSCTX_REMOTE_SERVER` | On another machine |
 | `CLSCTX_ALL` | All of the above |
 | `CLSCTX_ACTIVATE_32_BIT_SERVER` / `_64_BIT_SERVER` | Force bitness (only meaningful for LocalServer) |
@@ -294,11 +354,45 @@ In practice `InprocHandler32` is almost always `ole32.dll` — the **default han
 
 ### The other activation route: monikers
 
-`CoCreateInstance` says *"make me a new, empty object of class X."* Sometimes you instead want *"the object named by this string"* — a specific file, a WMI namespace, an **already-running** Excel, or an elevated instance. That's what **monikers** do, via `CoGetObject` / `MkParseDisplayName` and the Running Object Table.
+Everything so far answers one question: *"make me a new, empty object of class X."* But a lot of real code needs a different one: *"get me **the** object that this name refers to."* Not any calculator — **that** spreadsheet, **that** WMI namespace, **that** already-running copy of Excel.
 
-You'll need them for Module 7's elevation moniker, and every WMI connection string (`winmgmts:\\.\root\cimv2`) is one. See **[Appendix A §A.1](appendix-a-monikers-and-persistence.md#a1-monikers)**.
+A **moniker** is an object whose only job is to turn a **name** into an **object**. The name is a string, called a *display name*, and the moniker knows how to interpret it.
 
-Worth knowing now: moniker failures frequently bottom out as ordinary activation failures, so a `0x80040154` from `GetObject` sends you straight back to this module's flow.
+Two steps are involved, and `CoGetObject` does both for you:
+
+| Step | What happens |
+|---|---|
+| **Parse** | The prefix of the string (`winmgmts:`, `Elevation:`, `new:`) selects which moniker class handles it — via a registry lookup, just like activation. That class parses the rest of the string and produces a moniker object. |
+| **Bind** | You ask the moniker to produce the object. *This* is where it may create something new, open a file, connect to a service, or hand back something that already exists. |
+
+That second step is the real difference. `CoCreateInstance` always constructs something new. Binding a moniker may instead return an **existing** object, because it can consult the **Running Object Table** — a machine-wide list of objects that have registered themselves as "already running and available by name." That is how attaching to an open Excel workbook works.
+
+Some display names you will actually meet:
+
+| Display name | Binds to |
+|---|---|
+| `winmgmts:\\.\root\cimv2` | A WMI namespace — every WMI connection string is a moniker |
+| `Elevation:Administrator!new:{CLSID}` | A new instance of that class **in an elevated process** (Module 7) |
+| `new:{CLSID}` | A new instance — a *class moniker*, equivalent to `CoCreateInstance` |
+| `C:\Reports\Q3.xlsx` | The document object for that file — a *file moniker* |
+| `LDAP://CN=Users,DC=contoso,DC=com` | An Active Directory object, via ADSI |
+
+In C++ that is one call:
+
+```cpp
+CComPtr<IWbemServices> spSvc;
+HRESULT hr = CoGetObject(L"winmgmts:\\\\.\\root\\cimv2", nullptr, IID_PPV_ARGS(&spSvc));
+```
+
+and in scripting languages it is the `GetObject` half of the `CreateObject` / `GetObject` pair you may already have seen:
+
+```powershell
+$wmi = [WMI]"\\.\root\cimv2:Win32_Service.Name='Spooler'"   # a moniker
+```
+
+You do not need to write monikers to use them, and Appendix A covers the interfaces (`IMoniker`, `IBindCtx`, `MkParseDisplayName`) if you ever do. See **[Appendix A §A.1](appendix-a-monikers-and-persistence.md#a1-monikers)**.
+
+> **Support angle:** binding ends in the same activation machinery this module describes. When `GetObject` fails with `0x80040154 REGDB_E_CLASSNOTREG`, the missing registration is usually the **target class**, not the moniker — so you triage it exactly like any other activation failure. A failure in the *parse* step looks different: `MK_E_SYNTAX` means the string itself was never understood, and no activation was ever attempted.
 
 ---
 
@@ -323,16 +417,18 @@ So COM needs **one entry point that every COM DLL has, with a fixed name and a f
    one CLSID  ──►  one class object (the factory)  ──►  many instances
 ```
 
-**What lives where.** Note that for an *in-proc* server the DLL is loaded into the client's own process — so "sides" here means **who owns which code**, not two separate processes:
+**What lives where.** For an *in-proc* server the DLL is loaded into the client's own process — so "sides" here means **who owns which code**, not two separate processes.
 
-| | **Client code** | **`Calc.dll` — the code you write** |
+| | **The client** — any language | **`Calc.dll`** — the code you write |
 |---|---|---|
-| Starts with | two GUIDs: `CLSID_Calculator` and `IID_ICalculator` | nothing; it sits on disk until COM loads it |
-| Must provide | nothing but calls to COM APIs | `DllGetClassObject` — the one fixed export |
-| Ends up holding | an `ICalculator*` (and an `IClassFactory*` briefly) | the `CalculatorFactory`, and every `Calculator` instance |
-| Never has | your headers, your `.lib`, your class names | any idea who called it, or in what language |
+| **What it starts with** | Two GUIDs, and nothing else: `CLSID_Calculator` and `IID_ICalculator` | Nothing — it is a file on disk until COM loads it |
+| **What it must provide** | Nothing; it only calls COM APIs | One export: `DllGetClassObject`, with a name and signature COM already knows |
+| **What it ends up holding** | An `ICalculator*` — and an `IClassFactory*`, briefly | The `CalculatorFactory` singleton, and every `Calculator` it creates |
+| **What it never sees** | Your headers, your `.lib`, your class names | Who called it, or in what language |
 
-**The exchange**, with `CoCreateInstance` expanded into the calls it actually makes:
+Read the two columns and notice that neither one names anything in the other. That mutual ignorance is what makes the client language-independent.
+
+**Who calls whom, in order** — the same activation as before, but now showing which side each call lands on, with `CoCreateInstance` expanded into the calls it actually makes:
 
 ```
    CLIENT                           ║  Calc.dll  —  the code you write
@@ -369,7 +465,7 @@ That extra hop buys four things:
 | **Server lifetime control** | `LockServer(TRUE)` pins the server in memory between creations, so it isn't unloaded and reloaded each time. |
 | **Uniformity across server types** | An in-proc server hands its factory out through `DllGetClassObject`; an EXE server registers the same factory with `CoRegisterClassObject` at startup (Module 7). Same interface, entirely different plumbing, identical client code. |
 
-Note what `CreateInstance` does **not** take: constructor arguments. COM objects are always created empty and initialized afterwards through an interface — which is exactly why `IPersistFile`, `IInitializeWithStream` and friends exist.
+The interface itself is only two methods:
 
 ```cpp
 struct IClassFactory : public IUnknown
@@ -382,9 +478,47 @@ struct IClassFactory : public IUnknown
 - `CreateInstance` makes one object. `pUnkOuter` is for **aggregation** — if it's non-null and you don't support aggregation, you **must** return `CLASS_E_NOAGGREGATION`.
 - `LockServer(TRUE)` keeps the server loaded even with zero objects, so a client can hold the factory across creations.
 
-#### What `pUnkOuter` actually is: aggregation
+#### Objects are created empty: two-phase construction
 
-You'll write `if (pUnkOuter) return CLASS_E_NOAGGREGATION;` in a moment, so here's what you're declining.
+Look again at `IClassFactory::CreateInstance` above. It takes an aggregation pointer, an IID and an out-pointer — and **nowhere to pass constructor arguments**. There never can be, because that signature is fixed for every COM class in the world. A factory that accepted a file path would have a different signature from one that accepted a connection string, and COM could no longer call any of them generically.
+
+So COM splits object creation in two:
+
+| Phase | What happens |
+|---|---|
+| **1. Create** | `CoCreateInstance` gives you a valid but **empty** object — allocated, ref-counted, ready to receive calls, and holding no data. |
+| **2. Initialize** | You `QueryInterface` for an initialization interface and call a method on it to give the object its state. |
+
+That second phase is why a whole family of small, standard interfaces exists. Each one differs only in where the object's state is read from:
+
+| Interface | Initializes the object from |
+|---|---|
+| `IPersistFile` | A file path — `Load(L"C:\\...\\Thing.lnk", STGM_READ)` |
+| `IPersistStream` / `IPersistStreamInit` | An `IStream` — memory, a file, part of a compound document |
+| `IInitializeWithStream`, `IInitializeWithFile`, `IInitializeWithItem` | The three the shell hands to preview handlers and thumbnail providers |
+| Your own `Init(...)` method | Anything you like — this is what you will write most often |
+
+The classic example is a Windows shortcut. `CoCreateInstance` gives you a blank shell link; `IPersistFile::Load` fills it in from a `.lnk` file on disk:
+
+```cpp
+CComPtr<IShellLinkW> spLink;
+CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&spLink));
+
+CComPtr<IPersistFile> spFile;
+spLink->QueryInterface(IID_PPV_ARGS(&spFile));      // same object, second interface
+spFile->Load(L"C:\\Users\\me\\Desktop\\App.lnk", STGM_READ);   // now it has content
+
+wchar_t path[MAX_PATH];
+spLink->GetPath(path, MAX_PATH, nullptr, 0);        // meaningful only after Load
+```
+
+(Error checking omitted for brevity — in real code every one of those four calls returns an `HRESULT` you must test.)
+
+Note that both interfaces are on the **same object** — this is Module 1's identity rule doing real work.
+
+> **Support angle:** two-phase construction means "the object was created successfully" and "the object is usable" are different statements. A `CoCreateInstance` that returns `S_OK` followed by methods failing with `E_UNEXPECTED`, `E_FAIL` or nonsense results is a strong hint that the initialization step was skipped or failed silently. Always check whether the component expects a `Load` or `Init` call before use.
+
+#### What `pUnkOuter` actually is: aggregation
 
 **The situation.** Suppose someone wants to ship a `SecureCalculator`: the same arithmetic your `Calculator` already does, plus one extra interface of its own, `IAuditLog`. COM has **no implementation inheritance** — you cannot subclass another vendor's coclass, because all you were given is a GUID and a vtable. So there are exactly two ways to reuse the component, and both involve the outer object creating a private instance of the inner one.
 
@@ -401,7 +535,25 @@ Simple, always legal, and the client never learns the inner object exists. The c
 
 **Option 2 — aggregation.** The outer object writes **no forwarding code at all**. When the client asks `SecureCalculator` for `ICalculator`, it hands back a pointer that physically belongs to the **inner** object. Calls go straight there, at full speed.
 
-**The catch: the client must not be able to tell.** Either way the client believes it is holding *one* object that happens to support both `ICalculator` and `IAuditLog`:
+The whole idea sits in the outer object's `QueryInterface`:
+
+```cpp
+STDMETHODIMP CSecureCalculator::QueryInterface(REFIID riid, void** ppv)
+{
+    if (riid == IID_IUnknown || riid == IID_IAuditLog) {     // mine: answer it myself
+        *ppv = static_cast<IAuditLog*>(this);
+        AddRef();
+        return S_OK;
+    }
+    return m_pInnerUnknown->QueryInterface(riid, ppv);       // not mine: let the inner answer
+}
+```
+
+That last line is the entire difference. `ICalculator` is not listed, and `CSecureCalculator` does not implement it — the client receives the inner object's own `ICalculator` pointer, and every later `pCalc->Add(...)` runs in the inner object without the outer ever being on the stack.
+
+Compare the two options at the point where it costs you something — adding a method to `ICalculator`. Under containment you must write another forwarding stub. Under aggregation you change nothing at all; the new method is simply there.
+
+**The catch: aggregation must stay invisible.** `SecureCalculator` is advertised as *one* coclass, so a client that creates it must see a single object supporting both `ICalculator` and `IAuditLog`. It is never told that two objects are involved, and it must have no way of finding out:
 
 ```
                 what the client believes            what is really there
@@ -415,16 +567,51 @@ Simple, always legal, and the client never learns the inner object exists. The c
                                                     └──────────────────┘
 ```
 
-And that is where the difficulty lies, because of Module 1's Rule 1: **every interface of one object must return the same `IUnknown`.** If the outer naively handed out the inner's pointer, the client could call `QI(IID_IUnknown)` on it and get the *inner's* identity — two different answers from what is supposed to be one object, with its reference count split across both halves.
+And that is where the difficulty lies, because of Module 1's Rule 1: **every interface of one object must return the same `IUnknown`.** Suppose the outer simply handed out the inner's `ICalculator` pointer, with nothing else changed. A client could then run Module 1's identity test:
 
-The fix is that an aggregatable object implements **two** `IUnknown`s:
+```cpp
+IUnknown *pId1 = nullptr, *pId2 = nullptr;
+pAudit->QueryInterface(IID_IUnknown, (void**)&pId1);   // asks the OUTER  -> outer's identity
+pCalc ->QueryInterface(IID_IUnknown, (void**)&pId2);   // asks the INNER  -> inner's identity
 
-| | Purpose |
-|---|---|
-| **Non-delegating `IUnknown`** | The inner object's real one. Only the *outer* object uses it, to control the inner's lifetime. |
-| **Delegating `IUnknown`** | What the inner exposes on all its *other* interfaces. Every call forwards to `pUnkOuter`. |
+assert(pId1 == pId2);   // FAILS - so this is not one object after all
+```
 
-So when a client calls `QueryInterface`, `AddRef`, or `Release` on the `ICalculator` it got from the aggregate, the call lands on the **outer** object — one identity, one reference count, Rule 1 preserved.
+Two answers from what was advertised as one object, and a reference count split across two halves. The illusion collapses.
+
+**What the inner object therefore needs.** The three `IUnknown` methods have to give *different answers depending on who is calling*:
+
+- When a **client** calls `QueryInterface`/`AddRef`/`Release` through `ICalculator`, the answer must come from the **outer** — otherwise the test above fails.
+- When the **outer** calls them, to create and eventually destroy its private inner instance, the answer must come from the **inner itself**. If these also forwarded to the outer, the outer would be calling itself — and the inner could never be released.
+
+One set of three methods cannot do both. So an aggregatable object provides **two separate `IUnknown` implementations**, and the names simply describe whether each one passes the call along:
+
+| | What it does with a call | Who is given it |
+|---|---|---|
+| **Delegating `IUnknown`** | *Delegates* — forwards straight to `pUnkOuter` | Clients. It is the `QI`/`AddRef`/`Release` sitting at the head of `ICalculator` and every other public interface. |
+| **Non-delegating `IUnknown`** | *Doesn't delegate* — answers on its own behalf, managing the inner's own lifetime | The outer object, and nobody else. It is handed over once, at creation. |
+
+Stripped to essentials, the inner object looks like this:
+
+```cpp
+class CCalculator : public ICalculator
+{
+    IUnknown* m_pUnkOuter;                    // the outer, when aggregated; null when standing alone
+
+    // Delegating - reached through ICalculator, i.e. by clients.
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        { return m_pUnkOuter->QueryInterface(riid, ppv); }   // "not my question - ask my outer"
+    STDMETHODIMP_(ULONG) AddRef()  override { return m_pUnkOuter->AddRef();  }
+    STDMETHODIMP_(ULONG) Release() override { return m_pUnkOuter->Release(); }
+
+    // Non-delegating - a second, private IUnknown, given only to the outer.
+    // This one does the real work: it owns m_cRef and deletes the object.
+    class CNonDelegating : public IUnknown { /* the ordinary Module 1 implementation */ };
+    CNonDelegating m_unkNonDelegating;
+};
+```
+
+Now the identity test passes: `pCalc->QueryInterface(IID_IUnknown, ...)` runs the delegating version, forwards to the outer, and returns the outer's identity — the same pointer `pAudit` returns. One identity, one reference count, Rule 1 preserved.
 
 ```
    Client ──► ICalculator (physically implemented by the INNER object)
@@ -628,6 +815,38 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)
 }
 ```
 
+#### The three counters
+
+That listing contains three separate counts, which is one of the more confusing things about a hand-written server. They are not variations on the same idea — each answers a different question, at a different scope:
+
+| Counter | Scope | Answers | Who changes it |
+|---|---|---|---|
+| `m_cRef` | **One object** | *May this object be deleted?* | `AddRef` / `Release` on that object |
+| `g_cObjects` | **The whole DLL** | *How many `Calculator` objects are alive right now?* | The constructor and destructor |
+| `g_cLocks` | **The whole DLL** | *Is anyone keeping the DLL loaded without owning an object?* | `LockServer`, and the factory's own `AddRef`/`Release` |
+
+`m_cRef` is Module 1's reference count, one per instance. When it reaches zero, **that object** deletes itself — and nothing else happens.
+
+`g_cObjects` and `g_cLocks` exist for a different decision, made one level up: **may the DLL be unloaded?** A per-object count cannot answer that, because by the time an object's count hits zero the object is gone and has taken its counter with it. So the constructor increments a DLL-wide total and the destructor decrements it:
+
+```cpp
+Calculator()  { InterlockedIncrement(&g_cObjects); }
+~Calculator() { InterlockedDecrement(&g_cObjects); }
+```
+
+`g_cLocks` covers the case `g_cObjects` cannot see: a client that holds the **factory** but has not created anything yet, or is between creations. Without it, `DllCanUnloadNow` would report zero objects, the DLL could be unloaded, and the `IClassFactory` pointer the client is still holding would dangle. Note that in this server the factory's `AddRef`/`Release` also move `g_cLocks`, so merely holding the factory keeps the DLL loaded — `LockServer(TRUE)` is the explicit way to say the same thing.
+
+Both must be zero before it is safe to go:
+
+```cpp
+STDAPI DllCanUnloadNow(void)
+{
+    return (g_cObjects == 0 && g_cLocks == 0) ? S_OK : S_FALSE;
+}
+```
+
+> Getting this wrong is a genuine crash, not an inconvenience — see §2.9, where an over-eager `S_OK` unmaps the DLL while a client still holds an interface pointer.
+
 ### 2.5.3 `Calc.def` — the exports
 
 ```
@@ -698,20 +917,35 @@ This whole module turns on one question: how does a GUID become a running object
 
 The trace you capture is the reference picture of a *healthy* activation. Every failure in Lab 2.4 is a deviation from it, so keep it.
 
-1. Build `Calc.dll` (x64) and `CalcClient.exe` (x64).
-2. Register from an **elevated** prompt (HKCR writes need admin):
-   ```powershell
-   regsvr32 C:\Components\Calc.dll
+1. **Generate your own GUIDs first.** `Calculator.h` ships with placeholder values (`{A1B2C3D4-...}`) that every reader of this course would otherwise share. Two components registering the same CLSID overwrite each other's registry keys, and on a machine where you have done an earlier lab that is a real collision.
+
+   In Visual Studio, go to **Tools → Create GUID**, choose the **`DEFINE_GUID(...)`** format, and click **New GUID** then **Copy**. Do it twice — once for `IID_ICalculator`, once for `CLSID_Calculator` — pasting each over the matching block in `Calculator.h` and restoring the variable name, which the tool leaves as `<<name>>`:
+
+   ```cpp
+   // {9FEFA477-7715-4321-91ED-8E739203AEF4}
+   DEFINE_GUID(IID_ICalculator,
+       0x9fefa477, 0x7715, 0x4321, 0x91, 0xed, 0x8e, 0x73, 0x92, 0x03, 0xae, 0xf4);
    ```
-3. Run the client. Expect `40 + 2 = 42`.
-4. **Inspect the registry:**
+
+   **Write your CLSID down.** Every later step that shows `{A1B2C3D4-1111-4000-9000-000000000001}` — registry queries, the ProcMon filter, Labs 2.2 through 2.4 — means *your* CLSID. Nothing will match if you use the printed one.
+
+2. Build `Calc.dll` (x64) and `CalcClient.exe` (x64). Both land in the `x64\` folder beside the solution.
+3. Register from an **elevated** prompt (HKCR writes need admin), giving the **full path to your own copy** of the DLL:
    ```powershell
-   $clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"
+   cd <your-repo>\labs\stage-2-inproc-server
+   regsvr32 .\x64\Calc.dll
+   ```
+   There is no need to copy the DLL anywhere first. `DllRegisterServer` calls `GetModuleFileName` on itself, so whatever path you register from is the path written into `InprocServer32` — which is also why **moving the DLL afterwards breaks activation** until you re-register it.
+4. Run the client. Expect `40 + 2 = 42`.
+5. **Inspect the registry:**
+   ```powershell
+   $clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"   # <- your CLSID
    Get-ChildItem "Registry::HKEY_CLASSES_ROOT\CLSID\$clsid" -Recurse |
        ForEach-Object { $_.Name; $_ | Get-ItemProperty | Format-List }
    ```
-5. **Watch the SCM work.** Start Process Monitor, set a filter `Path contains A1B2C3D4-1111`, run the client, and read the trace. You will see the exact probe order: `RegOpenKey` on the CLSID, `InprocServer32`, `ThreadingModel`, then `CreateFile`/`Load Image` on the DLL. **Save this trace.** It is the reference picture of a *successful* activation; every failure is a deviation from it.
-6. **Break it:** `regsvr32 /u C:\Components\Calc.dll`, run the client again. Expect `0x80040154`. Look at the ProcMon trace now — you'll see `NAME NOT FOUND` on the CLSID key. That's the signature.
+   Check that `InprocServer32` holds the path you just registered.
+6. **Watch the SCM work.** Start Process Monitor, set a filter `Path contains` followed by the first block of your CLSID, run the client, and read the trace. You will see the exact probe order: `RegOpenKey` on the CLSID, `InprocServer32`, `ThreadingModel`, then `CreateFile`/`Load Image` on the DLL. **Save this trace.** It is the reference picture of a *successful* activation; every failure is a deviation from it.
+7. **Break it:** `regsvr32 /u .\x64\Calc.dll`, run the client again. Expect `0x80040154` — `REGDB_E_CLASSNOTREG`, "Class not registered". Look at the ProcMon trace now — you'll see `NAME NOT FOUND` on the CLSID key. That's the signature.
 
 ### Register per-user instead of per-machine
 
@@ -742,7 +976,7 @@ So cause it deliberately, confirm in the registry exactly which hive received th
 
 1. Build `Calc.dll` as **x86**. Register with the 32-bit regsvr32:
    ```powershell
-   C:\Windows\SysWOW64\regsvr32.exe C:\Components\x86\Calc.dll
+   C:\Windows\SysWOW64\regsvr32.exe .\x86\Calc.dll
    ```
 2. Run the **x64** client. Expect `0x80040154`.
 3. Confirm the cause: the registration went to `HKLM\Software\Classes\Wow6432Node\CLSID\{...}`:
@@ -752,11 +986,13 @@ So cause it deliberately, confirm in the registry exactly which hive received th
    ```
 4. Run the **x86** client. It works.
 5. **Fix option A:** build and register both bitnesses.
-6. **Fix option B (the interesting one):** use a DLL surrogate so the 32-bit DLL runs out-of-process and any client bitness can reach it. Add an AppID and point the CLSID at it:
+6. **Fix option B (the interesting one):** use a DLL surrogate so the 32-bit DLL runs out-of-process and any client bitness can reach it. Add an AppID and point the CLSID at it.
+
+   Both GUIDs below are yours to supply. `$clsid` is **your** CLSID from Lab 2.1. `$appid` is a **brand-new GUID you generate now** — the AppID key does not exist yet; this script creates it. Use **Tools → Create GUID** again, this time picking the *Registry Format* option, and paste the value in:
 
 ```powershell
-$clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"
-$appid = "{B1B2C3D4-2222-4000-9000-000000000002}"
+$clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"   # <- your CLSID from Lab 2.1
+$appid = "{B1B2C3D4-2222-4000-9000-000000000002}"   # <- a new GUID you just generated
 
 New-Item -Path "HKLM:\SOFTWARE\Classes\AppID\$appid" -Force |
     Set-ItemProperty -Name "(default)" -Value "Calculator Surrogate"
@@ -764,7 +1000,23 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\AppID\$appid" -Name "DllSurrogate
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\$clsid" -Name "AppID" -Value $appid
 ```
 
-Now call with `CLSCTX_LOCAL_SERVER`. The object runs in `dllhost.exe`. Verify with Process Explorer.
+An AppID is just a GUID naming a *process configuration* (§2.2), so any unique value will do — it needs no relationship to the CLSID. The empty `DllSurrogate` value is what means "host this in the system-provided surrogate, `dllhost.exe`" rather than in a surrogate EXE of your own.
+
+7. **Ask for an out-of-process server.** In `CalcClient.cpp`, change the third argument of `CoCreateInstance`:
+
+   ```cpp
+   // before - "load a DLL into me"
+   hr = CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_ICalculator, reinterpret_cast<void**>(&pCalc));
+
+   // after - "run it in its own process"
+   hr = CoCreateInstance(CLSID_Calculator, nullptr, CLSCTX_LOCAL_SERVER,
+                         IID_ICalculator, reinterpret_cast<void**>(&pCalc));
+   ```
+
+   Use `CLSCTX_LOCAL_SERVER` **alone**, not `CLSCTX_ALL`. Recall from §2.4 that COM prefers in-proc and would quietly load the DLL directly, proving nothing.
+
+8. Rebuild the **x64** client and run it. Now that the surrogate hosts the 32-bit DLL, a 64-bit client can reach it. While it runs, find **`dllhost.exe`** in Process Explorer and confirm `Calc.dll` is loaded inside it (Ctrl+D shows the DLL list) — the object is genuinely in another process.
 
 > **Caveat:** surrogate activation requires the interface to be marshalable — a registered proxy/stub or a type library. Your `ICalculator` has neither yet, so this lab will fail with `E_NOINTERFACE` at the `QueryInterface` step. **That is the intended lesson.** Come back and finish this lab at the end of Module 4. Write the failure down now.
 
@@ -782,7 +1034,27 @@ Now call with `CLSCTX_LOCAL_SERVER`. The object runs in `dllhost.exe`. Verify wi
 
 Modern deployment avoids the registry entirely: no admin rights, no machine-wide state, side-by-side versions, and clean uninstall. Activation data comes from **manifests** read into the process's **activation context**.
 
-### Step 1 — the server's assembly manifest, `Calc.manifest`
+> An **activation context** is an in-memory lookup table that Windows builds for a process from its manifests. It maps names — CLSIDs, ProgIDs, IIDs, type libraries, window classes, assembly identities — to the files that implement them. Think of it as *a private registry that lives only inside this process, for as long as it runs*.
+
+Three properties are what make reg-free COM work:
+
+| | |
+|---|---|
+| **Built at process start** | The loader reads the EXE's manifest — either embedded as a resource or sitting beside it as `App.exe.manifest` — then reads the manifest of every assembly it declares a `<dependency>` on. `Training.Calc.manifest` below is one of those. |
+| **In memory, per process** | Nothing is written anywhere. Two processes on one machine can use different versions of the same CLSID at the same time, and an uninstall is a file delete. |
+| **Checked before the registry** | This is step 1 of the `CoGetClassObject` chain in §2.4. Only if the activation context has no answer does COM fall back to `HKCR\CLSID`. |
+
+More precisely, the lookup uses the **current thread's** active context. Each thread keeps a stack of them, and the process default sits at the bottom; `ActivateActCtx` / `DeactivateActCtx` push and pop entries for code that needs a different one temporarily. You will not need those here, but it explains a classic failure — a component that activates fine from the main thread and fails from a thread created by a library that reset its context.
+
+The subsystem behind all of this is **side-by-side assemblies (SxS)**, which is why the tool for diagnosing it is `sxstrace.exe` rather than anything COM-branded.
+
+### Step 1 — the server's assembly manifest, `Training.Calc.manifest`
+
+Build the solution first so `x64\Calc.dll` and `x64\CalcClient.exe` exist. Then create a clean folder to test from — `C:\RegFreeTest\` — and copy both binaries into it. Working in a separate folder keeps the build output untouched and makes it obvious that nothing but these four files is involved.
+
+In that folder, create a new text file named exactly **`Training.Calc.manifest`** and paste this in (save as UTF-8):
+
+> **The filename is not free choice, and this is the single easiest thing to get wrong.** Windows locates a private assembly by probing for `<assemblyName>.manifest`, where `<assemblyName>` is the `name` attribute of `assemblyIdentity` — here `Training.Calc`. It never looks for a file named after the DLL. Call this file `Calc.manifest` and activation fails with `0x80040154`, with nothing logged to explain why. The `<file name="Calc.dll">` element *inside* is what names the DLL.
 
 ```xml
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -802,7 +1074,14 @@ Modern deployment avoids the registry entirely: no admin rights, no machine-wide
 </assembly>
 ```
 
+Two values in that listing are **not** copy-paste:
+
+- **`clsid`** must be the CLSID you generated in Lab 2.1, exactly as it appears in your `Calculator.h`, braces included. The client asks for *its* CLSID; if the manifest advertises a different one, the activation context has no match and you get `0x80040154`.
+- **`processorArchitecture`** must match the build — `amd64` for x64, `x86` for 32-bit. A mismatch is not reported as an error; the assembly simply never matches, and COM falls back to the registry.
+
 ### Step 2 — the client's application manifest, `CalcClient.exe.manifest`
+
+Create a second file in the same folder, named exactly **`CalcClient.exe.manifest`** — the executable's full filename, with `.manifest` appended. Its `processorArchitecture` must match too, and the `<dependency>` must name the *assembly* (`Training.Calc`), which is what ties it to the file you made in Step 1:
 
 ```xml
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -824,33 +1103,60 @@ Modern deployment avoids the registry entirely: no admin rights, no machine-wide
 </assembly>
 ```
 
-### Step 3 — deploy and test
+### Step 3 — stop Visual Studio embedding its own manifest
+
+This step is not optional, and skipping it is the most common reason this lab appears not to work. By default the linker **embeds** a manifest as a resource inside `CalcClient.exe`, and an embedded manifest wins outright — your external `CalcClient.exe.manifest` is never even read.
+
+In the **CalcClient** project only:
+
+1. Right-click the project → **Properties**.
+2. Set the configuration dropdown to **All Configurations** and platform to **x64**.
+3. Go to **Linker → Manifest File** and set **Generate Manifest** to **No**.
+4. Rebuild, and copy the new `CalcClient.exe` to `C:\RegFreeTest\`.
+
+**Leave the `Calc` DLL project alone.** Only the EXE's manifest matters here, because the loader builds the process's activation context from the *executable's* manifest and the dependencies it names. `Calc.dll` is found through `Training.Calc.manifest`, which sits beside it as a file — whatever manifest the linker may have embedded in the DLL is never consulted for this.
+
+(The alternative used in production is the opposite: keep embedding, and add your `<dependency>` to the embedded manifest through **Manifest Tool → Input and Output → Additional Manifest Files**. The external-file route is clearer for a first pass because you can edit the XML without rebuilding.)
+
+### Step 4 — deploy and test
 
 ```
 C:\RegFreeTest\
     CalcClient.exe
     CalcClient.exe.manifest
     Calc.dll
-    Calc.manifest              <- name must match assemblyIdentity name + ".manifest"
+    Training.Calc.manifest     <- the assemblyIdentity NAME + ".manifest", not the DLL's name
 ```
 
-1. **Fully unregister** the DLL: `regsvr32 /u Calc.dll`, and delete any leftover keys.
-2. Confirm the client now fails with `0x80040154`.
-3. Drop in the manifests. Run again — it works, with **nothing in the registry**.
+1. **Fully unregister** the DLL from an elevated prompt: `regsvr32 /u <path>\x64\Calc.dll`. Then confirm the key is really gone — note that the braces are part of the key name:
+   ```powershell
+   Get-Item "Registry::HKEY_CLASSES_ROOT\CLSID\{A1B2C3D4-1111-4000-9000-000000000001}"   # <- your CLSID
+   ```
+   It should report *Cannot find path*. Delete any leftovers by hand.
+2. Temporarily rename `Training.Calc.manifest` and `CalcClient.exe.manifest` (add `.off` to each) and run `CalcClient.exe`. It must fail with `0x80040154` — this proves the registry really is empty and that any success later is down to the manifests.
+3. Rename them back. Run again — it works, with **nothing in the registry** and **no elevation**.
 4. Verify in Process Monitor: no `HKCR\CLSID` probe at all. The activation context short-circuits it.
+
+> **If you change a manifest and nothing changes, touch the EXE.** Windows caches the activation context against the executable's **path and last-write time**. Once a run has failed, editing the external `.manifest` files does *not* invalidate that cache — the next run replays the cached failure and you get the same `0x80040154` no matter how correct the XML now is. Force a fresh build of the context by updating the EXE's timestamp:
+>
+> ```powershell
+> (Get-Item CalcClient.exe).LastWriteTime = Get-Date
+> ```
+>
+> Rebuilding the EXE, or copying the whole folder somewhere new, has the same effect. This one trap accounts for a large share of "reg-free COM doesn't work" — people fix the real problem, see no change, and conclude the fix was wrong.
 
 ### Common reg-free failures (memorize these)
 
 | Symptom | Cause |
 |---|---|
-| `0x80040154` still | Manifest not found (wrong filename), or the EXE has an *embedded* manifest which takes precedence over the external `.exe.manifest` file |
+| `0x80040154` still | Manifest not found (wrong filename), or the EXE has an *embedded* manifest which takes precedence over the external `.exe.manifest` file (Step 3) |
+| `0x80040154`, manifest looks correct | The server manifest is named after the **DLL** (`Calc.manifest`) instead of the **assembly** (`Training.Calc.manifest`). Windows probes for `<name>.manifest` using the `assemblyIdentity` *name*, and never looks at the DLL's filename |
+| Manifest is correct, but it still fails — and the *same files work when copied to a new folder* | A cached activation context from an earlier failed run. It is keyed on the EXE's path + timestamp, and editing a manifest does not invalidate it. Touch or rebuild the EXE |
 | `0x800736B1` `ERROR_SXS_...` / app won't start at all | Malformed XML, mismatched `assemblyIdentity`, wrong `processorArchitecture` |
 | Works for the EXE but not from a DLL in the same process | Activation context is per-thread; a DLL must use `CreateActingContext`/`ActivateActCtx`, or embed its own dependency |
 | Works in debug, fails when deployed | The manifest wasn't copied, or VS embedded a manifest that omits the dependency |
 
 Diagnostics: check the **Event Viewer → Applications and Services Logs → Microsoft → Windows → SideBySide** log. `sxstrace.exe trace -logfile:sxs.etl` then `sxstrace parse` gives an exact reason.
-
-> **Note on embedded manifests:** if the linker embedded a manifest into `CalcClient.exe` (VS does by default), the external `.exe.manifest` is ignored. Either disable manifest embedding (`Linker → Manifest File → Generate Manifest = No`) or add your dependency to the embedded one via *Additional Manifest Files*.
 
 ---
 
@@ -907,9 +1213,6 @@ This is the heart of the support track. For each row: know the symptom, the firs
 ```powershell
 # PowerShell
 [ComponentModel.Win32Exception]::new(0x8007007E).Message
-
-# or
-certutil -error 0x8007007e
 ```
 
 ```
