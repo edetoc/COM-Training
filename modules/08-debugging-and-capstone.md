@@ -430,7 +430,7 @@ COM PROBLEM
 │
 └── Is it just SLOW?
     ├── ETW: how many calls actually happen?
-    ├── ThreadingModel + client apartment → is every call marshaled? (Module 3 Lab 3.3)
+    ├── ThreadingModel + client apartment → is every call marshaled? (Module 3 §3.3, Lab 4.2)
     ├── Late-bound IDispatch instead of vtable? (Module 5 Lab 5.1)
     └── Out-of-proc where in-proc would do? CLSCTX_ALL picking the wrong server?
 ```

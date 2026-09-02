@@ -258,10 +258,6 @@ STA UI thread calls a slow out-of-proc server method; server calls back into the
 - Capture it with WinDbg: `~*kb`, `!locks`, and identify the RPC wait frames.
 - Fix it with `IMessageFilter` and by removing the lock from the callback path.
 
-**Lab 3.3 — ThreadingModel experiment**
-
-Register the same DLL server four times under four CLSIDs with `Apartment`, `Free`, `Both`, `Neutral`. From an MTA client and an STA client, activate each and log the thread ID the object's methods actually run on. Build a 4×2 matrix of results. **Keep this matrix** — it explains most "why is my object slow / why is it on the wrong thread" cases.
-
 **Support angle**
 
 - Hang triage recipe:

@@ -67,8 +67,8 @@ regsvr32 /u "<full path>\x64\Calc.dll"
 ## Notes
 
 - `ThreadingModel` is registered as `Both`. **Lab 3.1 requires `Apartment` instead** — change the
-  string in `DllRegisterServer`, rebuild, and re-register. Lab 3.3 has you register the same DLL
-  under five CLSIDs, one per model.
+  string in `DllRegisterServer`, rebuild, and re-register. Lab 4.2's final step has you cycle
+  through all four models to see which ones produce a proxy.
 - The factory is a static singleton, so its `AddRef`/`Release` move `g_cLocks` rather than a
   per-object count. That is deliberate and matches §2.5.1.
 

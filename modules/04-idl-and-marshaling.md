@@ -513,6 +513,47 @@ error MIDL2311: this type is not supported by automation: [ Parameter 'data' of 
 
 Write that error into your notes — you *will* see a developer hit it.
 
+5. **Watch `ThreadingModel` decide whether you get a proxy.** Now that marshaling works, one small experiment settles §3.3's table for good. Re-register `CalcPS.dll`, then add this helper to your client — it identifies a proxy without a debugger, by asking which module the vtable's code belongs to:
+
+```cpp
+// Your DLL -> you hold the real object. CalcPS/combase -> you hold a proxy.
+void WhoOwnsVtable(const char* label, void* pItf)
+{
+    void** vtbl = *reinterpret_cast<void***>(pItf);
+    HMODULE mod = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       static_cast<LPCSTR>(vtbl[0]), &mod);
+    char path[MAX_PATH] = "??";
+    if (mod) GetModuleFileNameA(mod, path, MAX_PATH);
+    const char* leaf = strrchr(path, '\\');
+    printf("%s vtable code lives in: %s\n", label, leaf ? leaf + 1 : path);
+}
+```
+
+Call `CoCreateInstance` and then `WhoOwnsVtable` from an **STA** thread and from an **MTA** thread. Then change `ThreadingModel` in `DllRegisterServer` — `Apartment`, `Free`, `Both`, `Neutral` — re-registering between runs, and fill this in:
+
+| `ThreadingModel` | STA client gets | MTA client gets |
+|---|---|---|
+| `Apartment` | | |
+| `Free` | | |
+| `Both` | | |
+| `Neutral` | | |
+
+With `Apartment` and an MTA client you should see `CalcPS.dll` — COM created the object in a host STA and handed you a proxy. That same case is exactly what fails with `E_NOINTERFACE` when no proxy/stub is registered, which is one of the most common activation tickets there is.
+
+**The cost, measured.** In any cell where you got a proxy, time the difference:
+
+```cpp
+LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f);
+QueryPerformanceCounter(&t0);
+for (int i = 0; i < 100000; ++i) { long r; sp->Add(i, 1, &r); }
+QueryPerformanceCounter(&t1);
+printf("  %.2f us/call\n", 1e6 * double(t1.QuadPart - t0.QuadPart) / f.QuadPart / 100000);
+```
+
+Expect single-digit **nanoseconds** for a direct call against **tens of microseconds** across an apartment boundary — a factor of roughly 1000. **That number is your argument** the next time someone asks why a component is slow inside a service.
+
 ---
 
 ## 4.8 LAB 4.3 — Memory ownership, verified
