@@ -2,6 +2,15 @@
 
 Module 3 showed that crossing an apartment boundary requires a proxy. This module explains where proxies come from, how COM knows how to package your parameters, and who owns the memory.
 
+Two names appear throughout, and they are a language and its compiler:
+
+| | | |
+|---|---|---|
+| **IDL** | *Interface Definition Language* | A small, C-like language for describing an interface **completely** — not just method names and types, but which parameters go in, which come out, how big the arrays are, and who frees what. You write `.idl` files by hand. |
+| **MIDL** | *Microsoft Interface Definition Language compiler* | `midl.exe`, the tool that reads your `.idl` and generates C/C++ headers, GUID definitions, the proxy/stub source, and a type library. You never write its output by hand. |
+
+The relationship is the ordinary one between source and compiler: **you write IDL, MIDL compiles it.** A third term, **NDR** (*Network Data Representation*), is the wire format MIDL's generated code uses to lay parameters out as bytes; it appears in §4.10 when you learn to read its failures.
+
 **What this module covers**
 
 Why a C++ header cannot describe an interface completely, and what IDL adds: parameter direction, array sizes, pointer semantics, and the memory-ownership rules that settle who allocates and who frees. You run MIDL and read everything it generates — including the type library, decompiled back into IDL, to see which parts of your interface a scripting language can and cannot reach. Then the three kinds of marshaling and when COM picks each, the one versioning rule you must never break, and how to read an NDR failure when the wire format and the code no longer agree.
@@ -25,13 +34,40 @@ Why a C++ header cannot describe an interface completely, and what IDL adds: par
 
 ## 4.1 Why IDL exists
 
-A C++ header describes an interface to a *C++ compiler*. But COM needs more:
+### First: why the labs so far did *not* need it
+
+You have built a working COM component across three modules with no IDL anywhere. That is worth explaining before adding a new tool, because it tells you exactly what IDL is for.
+
+COM's runtime contract is smaller than people assume. To create and call an object, all COM requires is:
+
+- a **vtable** with the methods in a known order, and
+- a **registered CLSID** pointing at the DLL.
+
+Your hand-written `Calculator.h` — an ordinary C++ header file — supplied both: the `struct ICalculator : IUnknown` gave the C++ compiler the vtable layout, and `DEFINE_GUID` gave you the IIDs. Nothing else was needed, because **every call you made was a direct vtable call** — client and object in the same process, in the same apartment. No description of the parameters is required to jump to a function pointer with the arguments already on the stack.
+
+IDL becomes necessary the moment something has to *understand* the call rather than merely make it:
+
+| Situation | Who needs the description | Where you met it |
+|---|---|---|
+| Call crosses an apartment or process boundary | The marshaler, to pack parameters into bytes | Lab 3.1, experiment 4 — `REGDB_E_IIDNOTREG` |
+| Caller is not C++ | A type library, read at runtime | Modules 5 and 6 |
+| Caller binds by name at runtime | A scripting engine | Module 5 |
+
+That failed line at the end of Lab 3.1 was the first time the header was not enough. This module is the fix.
+
+> **In real projects the order is usually reversed:** you write the IDL first and let MIDL generate the header. This course wrote the header by hand precisely so that you can now see exactly which parts MIDL takes over — and which extra facts it captures that a header cannot.
+
+### What `Calculator.h` cannot say
+
+By "a C++ header" this module means an ordinary `.h` file — concretely, the [`Calculator.h`](../labs/stage-2-inproc-server/Calculator.h) you have been including since Module 1, with its `DEFINE_GUID` lines and its `struct ICalculator : public IUnknown`. Nothing more exotic than that.
+
+Such a file describes an interface to a *C++ compiler*, and that is all. COM needs more:
 
 - **The marshaler** needs to know that `[out] BSTR* p` means "the callee allocates a string and the caller frees it," and that `[in, size_is(n)] BYTE* buf` means "copy `n` bytes across the wire."
-- **Other languages** need a machine-readable description.
-- **Scripting engines** need names and parameter types at runtime.
+- **Other languages** need a machine-readable description. A `.h` file is useless to PowerShell or C#.
+- **Scripting engines** need names and parameter types at runtime, long after your compiler has finished.
 
-A C++ header can't express any of that. `int* p` is ambiguous: is it in or out? One integer or an array? If an array, how long?
+A header can't express any of that. Look at a line like `long* result` in your own interface: is it in or out? One integer or an array? If an array, how long? Your C++ compiler does not care — it only needs the size of a pointer — but anything that has to *transmit* that parameter needs every one of those answers.
 
 **IDL** (Interface Definition Language) is the language that removes the ambiguity. **MIDL** is the compiler that turns IDL into:
 
@@ -40,8 +76,10 @@ A C++ header can't express any of that. `int* p` is ambiguous: is it in or out? 
 | `Foo.h` | C/C++ interface declarations |
 | `Foo_i.c` | GUID definitions (`IID_IFoo`, `CLSID_Bar`) |
 | `Foo_p.c` | **Proxy and stub code** — the marshaling implementation |
-| `dlldata.c` | Proxy/stub DLL boilerplate (`DllGetClassObject` etc. for the ps DLL) |
+| `dlldata.c` | The boilerplate that turns that code into a real COM in-proc server: `DllGetClassObject`, `DllRegisterServer`, and friends |
 | `Foo.tlb` | **Type library** — binary metadata for late binding and interop |
+
+The last two combine into a **proxy/stub DLL** — commonly shortened to **PS DLL**, and named `CalcPS.dll` in this course. It is an ordinary COM in-proc server; the only unusual thing about it is that the objects it creates are proxies and stubs rather than components of your own.
 
 ---
 
@@ -308,6 +346,31 @@ struct IMarshal : IUnknown
 
 **Security note:** custom marshaling means "the server tells the client which CLSID to instantiate locally." That has been the basis of real privilege-escalation attacks. `CLSCTX_NO_CUSTOM_MARSHAL` and the `EOAC_NO_CUSTOM_MARSHAL` flag to `CoInitializeSecurity` exist to block it. Modern hardened code sets them.
 
+### Which one will you actually meet?
+
+The first two are both common; they simply serve different kinds of interface. The third is rare in code you write, but you have already used one without knowing it.
+
+| Kind | How common | Where it shows up |
+|---|---|---|
+| **Standard** (MIDL proxy/stub) | Very common | C++ components with rich parameter types — byte buffers, structs, counted arrays. Anything that cannot be expressed in Automation types has no alternative. |
+| **Type library** | Very common | Anything `[dual]` or `[oleautomation]`: components meant to be driven from scripting, VBA, Office, or older VB. Preferred when it is possible, because there is no extra DLL to build, ship, register, or keep in sync. |
+| **Custom** (`IMarshal`) | Rare | Almost never written by hand. But the **free-threaded marshaler** from Module 3 is a custom marshaler — that is exactly how an agile object says "hand over the raw pointer, no proxy needed." |
+
+**The practical rule when writing an interface:** if it can be Automation-compatible, make it `[dual]` and use typelib marshaling — you get scripting support and cross-apartment marshaling from one registration. Reach for a proxy/stub DLL when the types will not fit, which in this course is `Checksum`'s `BYTE*` buffer and `GetHistory`'s counted array.
+
+**Telling them apart on a customer's machine** is a single registry read, and it decides what you go looking for next:
+
+```powershell
+$iid = "{A1B2C3D4-0001-4000-9000-000000000001}"
+Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\$iid\ProxyStubClsid32"
+```
+
+| Value | Meaning | What to check next |
+|---|---|---|
+| `{00020424-0000-0000-C000-000000000046}` | Typelib marshaling | Is the **TypeLib** key present, and does the `.tlb` exist at that path, in the right bitness? |
+| Any other CLSID | Standard marshaling | Is that CLSID's `InprocServer32` present, and is the PS DLL there in **both** bitnesses if both are used? |
+| Key missing entirely | No marshaling support | This is Lab 3.1's `REGDB_E_IIDNOTREG`, and Lab 2.2's failed surrogate |
+
 ---
 
 ## 4.5 The "works in-proc, fails out-of-proc" bug
@@ -331,18 +394,19 @@ Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\$iid\ProxyStubClsid32" -
 3. `ProxyStubClsid32 = {00020424-...}` → typelib marshaling; verify `HKCR\TypeLib\{LIBID}\<ver>\0\win64` (or `win32`) points at a file that exists.
 4. Everything present but still failing → bitness mismatch on the PS DLL, or the typelib is for a different version.
 
-This is also the reason **Lab 2.2's surrogate experiment failed**. Go back and finish it now: register the proxy/stub, and the `dllhost.exe` surrogate will work.
+This is also the reason **Lab 2.2's surrogate experiment failed**: `dllhost.exe` puts the object in another process, so every call has to be marshaled, and `ICalculator` had no marshaling to offer. You will finish that lab in **[Lab 4.2](#47-lab-42--break-and-fix-marshaling)**, once you have built the proxy/stub in Lab 4.1 — and note that it needs registering in **both bitnesses**, since that experiment deliberately pairs a 32-bit DLL with a 64-bit client.
 
 ---
 
 ## 4.6 LAB 4.1 — Author IDL, compile with MIDL, read the output
 
 > **Requirements**
-> - **Tools:** a **Developer PowerShell for VS** or *x64 Native Tools Command Prompt* — this is what puts `midl.exe` on `PATH`. A plain PowerShell window will fail with "midl is not recognized." Plus `New-Guid` or `guidgen.exe`, and **OleView.NET** for step 4.
+> - **Tools:** a **Developer PowerShell for VS** or *x64 Native Tools Command Prompt* — this is what puts `midl.exe` on `PATH`. A plain PowerShell window will fail with "midl is not recognized." Plus **Tools → Create GUID**, and **OleView.NET** for step 4.
 > - **Elevation:** not required — this lab only compiles.
 > - **Bitness:** `/env x64`, matching your build.
-> - **Depends on:** the IDL from §4.2. Generate **real** GUIDs; do not reuse the placeholders.
-> - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) holds the finished `Calculator.idl` and a project that builds the proxy/stub. Run MIDL by hand at least once anyway — reading its output *is* the lab.
+> - **Depends on:** Lab 2.1 — you will reuse the **same GUIDs** you generated there.
+> - **What you write:** `Calculator.idl`, by hand, from the listing in §4.2. Type it out; do not copy the finished file.
+> - **Reference copy:** [`labs/stage-3-idl-marshaling/Calculator.idl`](../labs/stage-3-idl-marshaling/Calculator.idl) is the completed version — use it to check your work if MIDL rejects something, not as a starting point. The same folder has `CalcPS.vcxproj`, which automates step 5 for later labs.
 > - **Time:** ~90 min — most of it spent reading the generated files, which is the point.
 
 Until now `ICalculator` has existed only as a C++ header — readable by one compiler, and by nothing else. This lab describes the same interface in **IDL** and runs MIDL over it.
@@ -351,7 +415,17 @@ The build takes a minute; the lab is what comes out. Those four generated files 
 
 ### Step 1 — write it
 
-Save the IDL from §4.2 as `Calculator.idl`. Generate real GUIDs.
+In a new folder, type the IDL from §4.2 into a file called `Calculator.idl`.
+
+**The GUIDs matter, and most of them are not new ones.** A proxy/stub is registered against a specific IID, so the interface described here must carry the *same* IID as the interface your DLL already implements — otherwise you will register marshaling for an interface nobody uses, and the failure will look exactly like having no marshaling at all.
+
+| In the IDL | Which GUID to use |
+|---|---|
+| `interface ICalculator` → `uuid(...)` | **Your `IID_ICalculator`** from Lab 2.1 — copy it out of `Calculator.h` |
+| `coclass Calculator` → `uuid(...)` | **Your `CLSID_Calculator`** from Lab 2.1 |
+| `library TrainingCalcLib` → `uuid(...)` | A **new** GUID — the type library has its own identity (its LIBID), and you have not generated one before |
+
+Note the format difference: IDL wants the GUID bare, `uuid(A1B2C3D4-0001-...)`, with no braces and no `0x` — not the `DEFINE_GUID` form in your header.
 
 ### Step 2 — compile
 
@@ -472,38 +546,67 @@ Marshaling is invisible while it works. This lab switches it on and off undernea
 
 It also closes Lab 2.2: the surrogate that could not work then works now, and you will know exactly which registration made the difference.
 
-1. With the PS DLL registered, redo **Lab 2.2's surrogate experiment**. It now works: your 32-bit DLL runs in `dllhost.exe` and a 64-bit client talks to it. Confirm with Process Explorer that `dllhost.exe` has loaded your DLL.
+1. With the PS DLL registered, redo **[Lab 2.2](02-activation-and-registry.md#27-lab-22--bitness) steps 6–8** — *Fix option B*, the DLL surrogate: the AppID with its empty `DllSurrogate` value, the client switched to `CLSCTX_LOCAL_SERVER`, and the run. It now works, where before it stopped at `E_NOINTERFACE`: your 32-bit DLL runs inside `dllhost.exe` and a 64-bit client talks to it. Confirm with Process Explorer that `dllhost.exe` has loaded your DLL.
+
+   Nothing about the AppID registration changed — the only difference is that `ICalculator` can now be marshaled, so COM is finally able to build the proxy that a separate process requires.
 
 2. `regsvr32 /u CalcPS.dll`. Re-run. Record the exact HRESULT and where it fails (activation vs. first call).
 
-3. **Switch to typelib marshaling.** Add `oleautomation` to the interface attributes and remove the non-Automation methods (`Checksum` with its `BYTE*`, `GetHistory` with its `LONG**`):
+3. **Switch to typelib marshaling.** Same interface, same client, a completely different marshaler — and no `CalcPS.dll` at all. Yes, this means editing the IDL and re-running MIDL; work through these in order.
 
-```idl
-[
-    object,
-    oleautomation,
-    uuid(...),
-    pointer_default(unique)
-]
-interface ICalculator : IUnknown
-{
-    HRESULT Add([in] LONG a, [in] LONG b, [out, retval] LONG* result);
-    HRESULT Describe([out, retval] BSTR* description);
-}
-```
+   **3a. Edit `Calculator.idl`.** Add `oleautomation` to the interface attributes, and delete the two methods whose types Automation cannot express — `Checksum` (a `BYTE*` buffer) and `GetHistory` (a `LONG**` array). **Keep the same `uuid`:** you are re-describing the existing interface, not inventing a new one.
 
-Register the type library instead of a PS DLL:
+   ```idl
+   [
+       object,
+       oleautomation,                       // <- added
+       uuid(A1B2C3D4-0001-...),             // <- unchanged, your IID from Lab 2.1
+       pointer_default(unique)
+   ]
+   interface ICalculator : IUnknown
+   {
+       HRESULT Add([in] LONG a, [in] LONG b, [out, retval] LONG* result);
+       HRESULT Describe([out, retval] BSTR* description);
+   }
+   ```
 
-```cpp
-// In DllRegisterServer:
-ITypeLib* pTypeLib = nullptr;
-HRESULT hr = LoadTypeLibEx(modulePath, REGKIND_REGISTER, &pTypeLib);
-if (pTypeLib) pTypeLib->Release();
-```
+   **3b. Re-run MIDL.** Exactly the command from Lab 4.1 step 2. This regenerates `Calculator.h`, `Calculator_i.c`, `Calculator_p.c` and — the one that matters now — `Calculator.tlb`.
 
-(Embed the `.tlb` as resource `1` in the DLL: add `1 typelib "Calculator.tlb"` to your `.rc` file.)
+   **3c. Rebuild `Calc.dll` against the new header.** You removed two methods, so the vtable changed; your C++ class must match it or the object will not compile. Delete the corresponding implementations.
 
-Confirm `ProxyStubClsid32` is now `{00020424-0000-0000-C000-000000000046}` and that cross-apartment calls work **with no proxy/stub DLL at all**.
+   **3d. Embed the type library in the DLL.** Add a `.rc` file to the `Calc` project containing one line, so the `.tlb` travels inside the DLL rather than as a loose file:
+
+   ```
+   1 typelib "Calculator.tlb"
+   ```
+
+   **3e. Register the type library from `DllRegisterServer`.** `LoadTypeLibEx` with `REGKIND_REGISTER` writes the `HKCR\TypeLib` keys *and* points the interface at the universal marshaler:
+
+   ```cpp
+   // In DllRegisterServer, after your existing CLSID registration:
+   ITypeLib* pTypeLib = nullptr;
+   HRESULT hr = LoadTypeLibEx(modulePath, REGKIND_REGISTER, &pTypeLib);   // modulePath = this DLL
+   if (pTypeLib) pTypeLib->Release();
+   ```
+
+   **3f. Remove the competition.** Unregister the proxy/stub so it cannot be responsible for any success you see:
+
+   ```powershell
+   regsvr32 /u CalcPS.dll        # elevated
+   regsvr32 Calc.dll             # re-register, now with the typelib
+   ```
+
+   **3g. Verify the switch happened.** The interface should now point at the universal marshaler rather than at your PS DLL:
+
+   ```powershell
+   $iid = "{A1B2C3D4-0001-4000-9000-000000000001}"   # <- your IID
+   Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\$iid\ProxyStubClsid32"
+   Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Interface\$iid\TypeLib"
+   ```
+
+   Expect `ProxyStubClsid32` = `{00020424-0000-0000-C000-000000000046}` and a `TypeLib` value naming your LIBID.
+
+   **3h. Re-run the surrogate test from step 1.** It still works — cross-process calls, **with no proxy/stub DLL anywhere on the machine**. That is the whole point of this step: two entirely different mechanisms, one unchanged client.
 
 4. **Prove the restriction.** Put `Checksum([in, size_is(cb)] const BYTE* data, ...)` back while keeping `oleautomation`. MIDL fails with something like:
 
@@ -511,7 +614,21 @@ Confirm `ProxyStubClsid32` is now `{00020424-0000-0000-C000-000000000046}` and t
 error MIDL2311: this type is not supported by automation: [ Parameter 'data' of Procedure 'Checksum' ]
 ```
 
+   **Why it fails.** Typelib marshaling has no generated code — `oleaut32.dll`'s universal marshaler reads the type library at runtime and marshals each parameter according to the **`VARTYPE`** recorded there. So every parameter must be describable as one of the Automation types: `VT_I4`, `VT_BSTR`, `VT_VARIANT`, `VT_ARRAY | ...`, an interface pointer, and the rest of the short list in §4.4.
+
+   `[in, size_is(cb)] const BYTE* data` is not on that list, and cannot be. It says *"a pointer to `cb` bytes"* — a length carried in a **separate parameter**. A type library describes each parameter independently; there is nowhere to record "this one's length lives in that one." Standard marshaling handles it easily, because MIDL bakes that relationship into the NDR format string it generates. The universal marshaler has no such string to read.
+
+   Adding `oleautomation` is you promising the interface stays inside that type set, so MIDL checks the promise and refuses at compile time rather than letting you ship an interface that fails to marshal at runtime. `GetHistory`'s `[out, size_is(, *count)] LONG**` is rejected for exactly the same reason.
+
+   **The Automation-compatible way to send a byte buffer** is a `SAFEARRAY` of `VT_UI1`, which carries its own length and so needs no companion parameter:
+
+```idl
+HRESULT Checksum([in] SAFEARRAY(BYTE) data, [out, retval] ULONG* checksum);
+```
+
 Write that error into your notes — you *will* see a developer hit it.
+
+   Then take `oleautomation` back out, restore `Checksum` and `GetHistory`, re-run MIDL and rebuild — step 5 needs the full interface and the proxy/stub route again.
 
 5. **Watch `ThreadingModel` decide whether you get a proxy.** Now that marshaling works, one small experiment settles §3.3's table for good. Re-register `CalcPS.dll`, then add this helper to your client — it identifies a proxy without a debugger, by asking which module the vtable's code belongs to:
 
