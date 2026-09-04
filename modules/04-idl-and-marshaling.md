@@ -676,93 +676,324 @@ Expect single-digit **nanoseconds** for a direct call against **tens of microsec
 ## 4.8 LAB 4.3 — Memory ownership, verified
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ with **ATL** (`atlbase.h`, `atlsafe.h`); **page heap** via `gflags.exe` or Application Verifier (Windows SDK); WinDbg for `!heap`.
-> - **Elevation:** required — `gflags` and Application Verifier write machine-wide image-execution options. Turn the flags **off** when you finish; page heap left enabled will slow the image down permanently.
+> - **Tools:** Visual Studio C++ with **ATL** (`atlbase.h`); **Application Verifier** — already on Windows, run `appverif.exe`, no SDK component required — and **WinDbg** for step 3.
+> - **Elevation:** only for Application Verifier, at the end. The programming half needs none.
 > - **Bitness:** x64.
-> - **Depends on:** Lab 4.1's `ICalculator` (you need `Describe`, `Checksum`, and `GetHistory`).
-> - **Starting point:** [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) — those three methods are already in `Calculator.idl`.
-> - **Time:** ~90 min.
+> - **Depends on:** §4.3's rules. **No registration, no MIDL, no DLL** — see the note below.
+> - **Starting point:** a new, empty C++ console project.
+> - **Time:** ~60 min.
 
-Write a client that exercises every allocation rule, then prove correctness with tooling.
+The ownership rules in §4.3 are about **which allocator frees a block**. That is fixed by the interface contract — `BSTR` means `SysFreeString`, `[out]` array means `CoTaskMemFree` — and none of it depends on how the object was *created*. So this lab skips the activation machinery entirely: no IDL, no MIDL, no proxy/stub DLL, no class factory, no registry entry, no `CoCreateInstance`. Just `new Calculator()` and an interface pointer.
+
+What it does still use is the part that matters here: COM's allocators. `SysAllocString`, `CoTaskMemAlloc` and their matching frees behave identically whether the caller is across a proxy or one stack frame away, which is why testing them in-process proves the same thing.
+
+You write **both sides** — the method that allocates and the caller that frees — because that is the only way to feel where the boundary is. Then you break each rule deliberately and watch the tooling catch it.
+
+### Step 1 — the whole program
+
+Paste this into the project's `.cpp` file. It compiles as-is.
 
 ```cpp
+#include <windows.h>
+#include <objbase.h>
 #include <atlbase.h>
-#include <atlsafe.h>
+#include <cassert>
+#include <cstdio>
+#include <vector>
+
+// The same interface as Calculator.idl, declared inline so this lab needs no build plumbing.
+struct __declspec(uuid("A1B2C3D4-0001-4000-9000-000000000001")) ICalculator : IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE Add(LONG a, LONG b, LONG* result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Describe(BSTR* description) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetHistory(ULONG* count, LONG** values) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Checksum(const BYTE* data, ULONG cb, ULONG* checksum) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_Precision(LONG value) = 0;
+};
+
+class Calculator : public ICalculator
+{
+    LONG              m_cRef = 1;
+    std::vector<LONG> m_history;
+    LONG              m_precision = 2;
+
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICalculator))
+            *ppv = static_cast<ICalculator*>(this);
+        else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_cRef); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        ULONG n = InterlockedDecrement(&m_cRef);
+        if (n == 0) delete this;
+        return n;
+    }
+
+    HRESULT STDMETHODCALLTYPE Add(LONG a, LONG b, LONG* result) override
+    {
+        if (!result) return E_POINTER;
+        *result = a + b;
+        m_history.push_back(*result);
+        return S_OK;
+    }
+
+    // RULE 1: callee allocates a BSTR, CALLER frees it with SysFreeString.
+    HRESULT STDMETHODCALLTYPE Describe(BSTR* description) override
+    {
+        if (!description) return E_POINTER;
+        *description = nullptr;                  // null first, before anything can fail
+        if (m_precision < 0) return E_FAIL;      // failure path, used by rule 4
+        *description = SysAllocString(L"Training Calculator v1");
+        return *description ? S_OK : E_OUTOFMEMORY;
+    }
+
+    // RULE 2: callee allocates with CoTaskMemAlloc, CALLER frees with CoTaskMemFree.
+    HRESULT STDMETHODCALLTYPE GetHistory(ULONG* count, LONG** values) override
+    {
+        if (!count || !values) return E_POINTER;
+        *count = 0; *values = nullptr;           // null EVERYTHING first
+        const ULONG n = static_cast<ULONG>(m_history.size());
+        if (n == 0) return S_OK;                 // zero items is not an error
+        auto* p = static_cast<LONG*>(CoTaskMemAlloc(n * sizeof(LONG)));
+        if (!p) return E_OUTOFMEMORY;
+        memcpy(p, m_history.data(), n * sizeof(LONG));
+        *values = p; *count = n;
+        return S_OK;
+    }
+
+    // RULE 3: an [in] buffer belongs to the CALLER. Read it; never free it, never keep it.
+    HRESULT STDMETHODCALLTYPE Checksum(const BYTE* data, ULONG cb, ULONG* checksum) override
+    {
+        if (!checksum) return E_POINTER;
+        *checksum = 0;
+        if (cb && !data) return E_POINTER;
+        ULONG sum = 0;
+        for (ULONG i = 0; i < cb; ++i) sum += data[i];
+        *checksum = sum;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE put_Precision(LONG value) override
+    {
+        m_precision = value;
+        return S_OK;
+    }
+};
 
 void ExerciseMemoryRules(ICalculator* p)
 {
-    // --- BSTR: callee allocates, caller frees with SysFreeString ---
+    // RULE 1 - BSTR
     BSTR desc = nullptr;
     if (SUCCEEDED(p->Describe(&desc)))
     {
         wprintf(L"desc = %s (len %u)\n", desc, SysStringLen(desc));
-        SysFreeString(desc);          // correct
-        // CoTaskMemFree(desc);       // <-- HEAP CORRUPTION: wrong base address
+        SysFreeString(desc);
     }
 
-    // --- [out] array: callee allocates with CoTaskMemAlloc, caller frees ---
-    ULONG count = 0;
-    LONG* values = nullptr;
+    // RULE 2 - [out] array
+    LONG r = 0;
+    p->Add(40, 2, &r);
+    ULONG count = 0; LONG* values = nullptr;
     if (SUCCEEDED(p->GetHistory(&count, &values)))
     {
-        for (ULONG i = 0; i < count; ++i) wprintf(L"%ld ", values[i]);
-        CoTaskMemFree(values);        // correct
+        for (ULONG i = 0; i < count; ++i) wprintf(L"history[%u] = %ld\n", i, values[i]);
+        CoTaskMemFree(values);
     }
 
-    // --- [in] buffer: caller owns it start to finish ---
+    // RULE 3 - [in] buffer, owned by us start to finish
     BYTE data[] = { 1, 2, 3, 4 };
     ULONG sum = 0;
-    p->Checksum(data, ARRAYSIZE(data), &sum);   // callee must NOT free 'data'
+    p->Checksum(data, ARRAYSIZE(data), &sum);
+    wprintf(L"checksum = %lu\n", sum);
 
-    // --- Failure path: [out] must be nulled ---
-    BSTR shouldBeNull = reinterpret_cast<BSTR>(0xDEADBEEF);
-    HRESULT hr = p->DescribeThatAlwaysFails(&shouldBeNull);
+    // RULE 4 - an [out] parameter must be nulled even when the call fails
+    p->put_Precision(-1);
+    BSTR shouldBeNull = reinterpret_cast<BSTR>(static_cast<UINT_PTR>(0xDEADBEEF));
+    HRESULT hr = p->Describe(&shouldBeNull);
     assert(FAILED(hr) && shouldBeNull == nullptr);
+    p->put_Precision(2);
+    wprintf(L"failure path left the [out] parameter null - correct\n");
+}
+
+int main()
+{
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    {
+        CComPtr<ICalculator> sp;
+        sp.Attach(new Calculator());
+        ExerciseMemoryRules(sp);
+    }
+    CoUninitialize();
+    return 0;
 }
 ```
 
-Server side, showing correct allocation:
+Run it. The correct output is:
+
+```
+desc = Training Calculator v1 (len 22)
+history[0] = 42
+checksum = 10
+failure path left the [out] parameter null - correct
+```
+
+Read `ExerciseMemoryRules` against the `RULE` comments in the class above it. Each pair is one rule from §4.3, written from both ends — the side that allocates and the side that frees.
+
+### Step 2 — break each rule, one at a time
+
+Make one change, run, then put it back. Run each one in **Debug** and in **Release**, with **Ctrl+F5** (Start Without Debugging) so the console stays open and Visual Studio prints the exit code.
+
+| # | Change | Which rule it breaks |
+|---|---|---|
+| 1 | In `ExerciseMemoryRules`, replace `SysFreeString(desc)` with `CoTaskMemFree(desc)` | `BSTR` must be freed with `SysFreeString` |
+| 2 | In `ExerciseMemoryRules`, replace `CoTaskMemFree(values)` with `delete[] values` | An `[out]` array must be freed with `CoTaskMemFree` |
+| 3 | In `Checksum`, add `CoTaskMemFree((void*)data)` before returning | An `[in]` buffer belongs to the caller; the callee must not free it |
+| 4 | In `Describe`, delete the `*description = nullptr;` line | An `[out]` parameter must be nulled even on failure |
+| 5 | In `GetHistory`, add `p[n] = 0;` immediately after the `memcpy` | An `[out]` array must not be written past the size that was allocated for it |
+
+**Do not expect a particular result. Write down what you actually get.** Every one of these is undefined behaviour, and undefined behaviour has no fixed symptom. Across the machines this lab was written on, the same five changes produced *all* of the following:
+
+| What you may see | What it means |
+|---|---|
+| The program runs and prints correct output | The damage was done and nobody noticed. **This is the most dangerous result**, and the most common in Release. |
+| Exit code `0xC0000374` (`STATUS_HEAP_CORRUPTION`) | The heap manager read a block header, found nonsense, and killed the process on the spot. |
+| Exit code `0xC0000005` (access violation) | A wild pointer was dereferenced. |
+| What looks like a **hang** | Almost always a modal dialog waiting behind the console — the debug CRT's *invalid heap pointer* check for #2, or your own `assert` for #4. Alt-Tab to it. |
+
+Whether you see a crash depends on the build configuration, the C runtime version, which heap the process happens to be using, and what else was allocated first. Break 1 crashed reliably on one machine and completed cleanly on another, with the same compiler flags.
+
+That variability is not a nuisance to work around — it *is* the lesson, and it is worth stating in one sentence you can reuse on a ticket:
+
+> **A mismatched free is not reliably fatal. It is reliably a bug.**
+
+The absence of a crash tells you nothing about whether the code is correct, which is why "we've shipped it for years and it's fine" is not evidence. It also means you cannot find these by running the program and watching. You need a tool that checks every free as it happens — which is step 3.
+
+**Break #2 deserves a special mention: it may be undetectable.** `CoTaskMemAlloc` and the CRT's `new[]` both end up calling `HeapAlloc` on the **same** heap — you can prove it with `GetProcessHeaps` and `HeapValidate`. So at the Win32 level, freeing a `CoTaskMemAlloc` block with `delete[]` is a perfectly matched allocate/free pair on one heap, and nothing in the operating system has grounds to object. No crash, no corruption, and — as you will see in step 3 — not even page heap will flag it.
+
+It is still a bug. The contract says `CoTaskMemFree`, and the moment that object lives in another process the memory is freed by a different allocator entirely, at which point the mismatch becomes real. **A rule you cannot test for is a rule you have to follow deliberately**, and that is the most uncomfortable idea in this module.
+
+**Two things you can predict**, because they do not depend on the heap:
+
+- **#4 in Debug** trips the `assert`, because a failed `Describe` leaves `0xDEADBEEF` in the caller's variable.
+- **#4 in Release** does not, because `assert` is compiled out — leaving a caller holding a garbage pointer it believes it must free. That is how this bug reaches a customer.
+
+### Step 3 — troubleshoot break #5 with page heap
+
+Break #5 is the one to chase, for three reasons. It is a **server-side** bug, so it is in someone else's code as far as the caller is concerned. It is an ordinary off-by-one, the kind that survives code review. And it produces **no symptom whatsoever** — which is exactly the ticket you get handed.
+
+Page heap changes that. It gives every allocation its own page and leaves the **next page unmapped**, so a write that runs off the end has a wall to hit instead of harmless slack — and it checks a fill pattern around each block when the block is freed. One of those two catches the overrun, and §3c explains which and why.
+
+Everything here uses the **Release** configuration — that is what customers run, and Debug's C runtime does its own checking, which would muddy the question of what is catching the bug.
+
+**3a. Reproduce the "nothing is wrong" report.**
+
+Set the dropdown to **Release | x64**, and make sure break #5 is in place:
 
 ```cpp
-HRESULT STDMETHODCALLTYPE Calculator::Describe(BSTR* description)
-{
-    if (!description) return E_POINTER;
-    *description = nullptr;                       // null first
-    *description = SysAllocString(L"Training Calculator v1");
-    return *description ? S_OK : E_OUTOFMEMORY;
-}
-
-HRESULT STDMETHODCALLTYPE Calculator::GetHistory(ULONG* count, LONG** values)
-{
-    if (!count || !values) return E_POINTER;
-    *count = 0; *values = nullptr;                // null EVERYTHING first
-
-    const ULONG n = static_cast<ULONG>(m_history.size());
-    if (n == 0) return S_OK;                      // zero items is not an error
-
-    auto* p = static_cast<LONG*>(CoTaskMemAlloc(n * sizeof(LONG)));
-    if (!p) return E_OUTOFMEMORY;
-
     memcpy(p, m_history.data(), n * sizeof(LONG));
+    p[n] = 0;                    // BREAK 5: one LONG past the end of the allocation
     *values = p;
     *count  = n;
-    return S_OK;
-}
 ```
 
-### Verify with tooling
+Run with **Ctrl+F5**. It prints the correct history and exits cleanly, with code 0. Run it a few more times — still fine. **This is the state you are in when a customer says it crashes twice a week and you cannot reproduce it.** The stray write landed in padding the allocator happened to leave after the block; a different allocation size on a different day, and it lands on live data instead.
 
-1. **Application Verifier** → your client EXE → enable **Basics: Heaps** (page heap) and **COM**. Run under a debugger.
-2. Introduce the `CoTaskMemFree(desc)` bug. With page heap on, it faults **immediately, at the bad free**, with a clear "invalid address" — instead of corrupting the heap and crashing somewhere unrelated later. **This is why page heap is the first thing you turn on for a heap-corruption ticket.**
-3. Introduce a leak (skip `SysFreeString`) and detect it:
-   ```
-   0:000> !heap -s
-   0:000> !heap -stat -h <heap>          ; allocation stats by size
-   0:000> !heap -p -a <address>          ; who allocated this block (needs page heap)
-   ```
-4. Check `BSTR` accounting specifically: `oleaut32` keeps a cache. `!bstr` isn't standard, but you can set `OANOCACHE=1` in the environment to disable the `BSTR` cache so leaks show up immediately in heap statistics. **Remember this trick** — `BSTR` leaks are otherwise masked by the cache.
+**3b. Turn on page heap.** Launch `appverif.exe` **as administrator** (it ships with Windows; use the `System32` copy for an x64 build). Then:
 
----
+- **File → Add Application** → browse to your **Release** build's `.exe`, e.g. `...\x64\Release\YourApp.exe`
+- In the **Tests** pane tick **Basics → Heaps**, and untick everything else
+- **File → Save**, then close Application Verifier
+
+> Application Verifier stores this under *Image File Execution Options* keyed on the **image name**, not the full path. So it now applies to any executable called `YourApp.exe` on this machine — including your Debug build. Convenient here; a genuine surprise months later when a forgotten entry is still slowing something down.
+
+**3c. Run it under WinDbg.** From here on, use **WinDbg** rather than the Visual Studio debugger — the commands you need are WinDbg extensions and Visual Studio cannot run them. Get it from the Microsoft Store, from *Debugging Tools for Windows* in the SDK, or with `winget install Microsoft.WinDbg`.
+
+**File → Launch Executable**, pick your **Release** `.exe`. WinDbg stops immediately with:
+
+```
+Break instruction exception - code 80000003 (first chance)
+```
+
+**That first one is not your bug.** WinDbg always halts at a loader breakpoint before the target's own code has run — note the stack is in `ntdll`. Let the program continue:
+
+```
+0:000> g
+```
+
+Now watch for a *second* `80000003`. That one is the verifier, and you can tell them apart because it arrives with a `VERIFIER STOP` block printed alongside it. Both events report the same exception code, which is why the report text — not the code — is what identifies it.
+
+A debugger is required for any of this: a verifier stop is a breakpoint exception, so with no debugger attached the process simply exits with `0x80000003` and tells you nothing.
+
+Where it stops depends on **how far past the end you wrote**, and that is worth understanding rather than shrugging at.
+
+Ticking **Basics → Heaps** enables *full* page heap — Application Verifier records `PageHeapFlags = 0x3` for your image, meaning full page heap plus stack-trace collection. Full page heap leaves the page after each block unmapped, but the block must still satisfy the allocator's alignment, so there is normally **padding** between the end of your data and that guard page. Page heap fills the padding with a known pattern and checks it when the block is freed.
+
+| How far the write lands | When you find out |
+|---|---|
+| Inside the alignment padding | **At `CoTaskMemFree`.** The write touches a mapped page, so nothing faults; the verifier notices the disturbed pattern at free time and reports a *corrupted suffix pattern*. |
+| Past the padding, onto the guard page | **At the write itself**, as an access violation on that line. |
+
+Break #5 gives you the first case, and that is the normal outcome for a realistic off-by-one: the padding on x64 can be a dozen bytes or more, so overrunning a small array by one or two elements stays inside it. Do not chase the second case by nudging the index — how far you must go depends on the allocation size and the alignment page heap chose. If you want to see a guard-page fault, overrun by an amount that obviously clears the padding, such as `memset(p, 0, (n + 32) * sizeof(LONG));`.
+
+**Stopping at the free is just as useful as stopping at the write.** Either way the verifier hands you the block, its size, and the exact offset of the damage:
+
+```
+=======================================
+VERIFIER STOP 000000000000000F: pid 0x55B8: Corrupted suffix pattern for heap block.
+
+    000001956B381000 : Heap handle used in the call.
+    000001956FBD9FF0 : Heap block involved in the operation.
+    0000000000000004 : Size of the heap block.
+    000001956FBD9FF4 : Corruption address.
+```
+
+Read it as a sentence, because the numbers corroborate each other:
+
+| Line | What it tells you |
+|---|---|
+| *Corrupted suffix pattern* | The fill pattern immediately **after** the block was disturbed. The damage is an **overrun** — not a bad pointer, not a double free. |
+| Heap block `...D9FF0`, size `4` | The allocation was **4 bytes**: one `LONG`. So `m_history` held a single entry and `CoTaskMemAlloc(n * sizeof(LONG))` asked for exactly four bytes. |
+| Corruption address `...D9FF4` | Block start **+ 4** — the first byte past the end. That is `p[1]` on a one-element array: exactly the `p[n] = 0;` you wrote. |
+
+Those addresses also explain why nothing faulted at the write. The block sits at `...D9FF0` and ends at `...D9FF4`; the page ends at `...DA000`. Everything from `...D9FF4` to `...D9FFF` is alignment padding on a **mapped** page, filled with the verifier's pattern. The write landed inside it — harmless to the hardware, invisible until the block was freed and the pattern checked. To fault on the write itself it would have to reach `...DA000`, the guard page, twelve bytes further on.
+
+The **size** tells you how many elements were expected; the **offset** tells you how far past the end the write went. Together they identify an off-by-one without reading a line of source — and with no repro steps and no luck.
+
+Now ask where the block came from, using the address from that report:
+
+```
+0:000> !ext.heap -p -a 000001956FBD9FF0
+    address 000001956fbd9ff0 found in
+    _DPH_HEAP_ROOT @ 1956b381000
+    in busy allocation (  DPH_HEAP_BLOCK:         UserAddr         UserSize -         VirtAddr         VirtSize)
+                             1956b3abea0:      1956fbd9ff0                4 -      1956fbd9000             2000
+    ...
+    00007ff8bab9e71c ntdll!RtlAllocateHeap+0xabc
+    00007ff881b6d411 vrfcore!VfCoreRtlAllocateHeap+0x21
+    00007ff67bdf1481 COMmemOwnership!Calculator::GetHistory+0x71 [...\COMmemOwnership.cpp @ 68]
+    00007ff67bdf16d7 COMmemOwnership!main+0xd7                  [...\COMmemOwnership.cpp @ 140]
+    00007ff67bdf1fbf COMmemOwnership!__scrt_common_main_seh+0x10f
+    00007ff8ba3accb7 KERNEL32!BaseThreadInitThunk+0x17
+```
+
+This is the whole point of the exercise. Three things to read out of it:
+
+- **`Calculator::GetHistory ... @ 68`** — the line that allocated the block, with file and line number. You did not have to guess which allocation the corrupt block belonged to; page heap recorded the stack at allocation time and kept it.
+- **`UserSize 4 - VirtSize 2000`** — you asked for 4 bytes and page heap gave the block its own **0x2000** of address space, so it could sit against a guard page. That is the cost of the technique, and why you turn it off afterwards.
+- **`vrfcore!VfCoreRtlAllocateHeap`** — the verifier's hook, sitting between your `CoTaskMemAlloc` and the real `RtlAllocateHeap`. That interception is what makes all of this possible.
+
+Put the two reports together and the bug is fully described without opening the source: *a 4-byte block allocated at `GetHistory` line 68 was written past its end.*
+
+**3d. Turn it off when you finish.** Back in Application Verifier, select the image, choose **Delete**, and save. Page heap left enabled slows that executable down permanently, and because the setting is keyed on the image name it is easy to forget it is there.
+
+> **Why this matters more than the code.** In a real ticket you are handed a crash *inside someone else's component*, with a stack that has nothing to do with the mistake. The mistake was a mismatched free that happened minutes earlier. Page heap is how you move the fault back to the culprit, and knowing that these five rules exist is how you guess what to look for.
 
 ## 4.9 Versioning: never modify a published interface
 
