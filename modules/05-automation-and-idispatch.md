@@ -697,7 +697,7 @@ public:
         for (LONG i = 1; i <= n; ++i)
         {
             sum += i;
-            if (n >= 10 && i % (n / 10) == 0)
+            if (n >= 100 && i % (n / 10) == 0)
                 Fire_OnProgress(i / (n / 100));   // generated helper: calls every sink
         }
         *total = sum;
@@ -850,13 +850,15 @@ spCP->Unadvise(cookie);              // the source Releases the sink    -> count
 > | Can it be used safely at any time? | yes | only while something *else* holds a strong reference |
 > | Participates in a cycle? | **yes** | no — which is exactly why weak references break cycles |
 
-`Advise` makes the source hold a **strong** reference to the sink. The client typically holds a strong reference to the source. That is a **cycle**:
+`Advise` makes the source hold a **strong** reference to the sink. The client typically holds a strong reference to the source. That is a **cycle** — but only once the third arrow exists:
 
 ```
-   Client ──strong──► Source ──strong──► Sink ──(often)──► Client
+   Client ──strong──► Source ──strong──► Sink ──(usually)──► Client or Source
 ```
 
-Forget `Unadvise` and nothing is ever destroyed. This is the single most common COM leak in the wild.
+That third arrow is worth being precise about, because it is what the leak actually depends on. With only the first two, forgetting `Unadvise` costs you nothing: the client releases the source, the source's count reaches zero, and as it is destroyed the connection point releases every sink still registered. Cleanup happens late, but it happens.
+
+The sink almost always does hold that reference, though — it needs the source to read a property while handling an event, or to `Unadvise` itself later, or because the sink *is* the client object. Once it does, neither side can reach zero: forget `Unadvise` and nothing is ever destroyed. Lab 5.2 has you build both versions and watch the second one stop cleaning up.
 
 **Why not just make one of them weak?** That is a legitimate cycle-breaker in general — Module 1 lists it alongside `IWeakReference` — but it cannot work here. The source may need to call the sink at any moment, possibly across a process boundary, so it must be certain the sink is still alive: that requires a strong reference. **Connection points therefore break the cycle by hand rather than by weakness**, and `Unadvise` is that break. Nothing else will do it for you.
 
@@ -1280,31 +1282,376 @@ Then time 100,000 calls each. Early-bound C++ vs VBScript typically differs by *
 ## 5.10 LAB 5.2 — Events and the `Unadvise` leak
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ with **ATL** (connection-point implementation); PowerShell for `Register-ObjectEvent`. If you have **both** Windows PowerShell 5.1 and PowerShell 7, run step 5 in each and compare — plain late-bound calls behave identically, but event subscription is where the two hosts are most likely to diverge, and knowing which one a customer is using saves a long detour.
-> - **Elevation:** required, to register the server and TLB.
-> - **Bitness:** x64, matching the PowerShell host you use.
-> - **Depends on:** the Lab 5.1 server, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
+> - **Tools:** Visual Studio C++ with **ATL** (connection-point implementation); **either** Windows PowerShell 5.1 **or** PowerShell 7 — they behave identically here, including the failure in step 5a, so one is enough; `cscript.exe` for the script sink.
+> - **Elevation:** none, if the server is already registered from Lab 5.1. Rebuilding it re-runs registration, which needs admin unless you took the per-user redirection option in the Stage 4 README.
+> - **Bitness:** x64 — the sink, the scripting host and the server must all agree.
+> - **Depends on:** Lab 5.1, complete and registered, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), built with connection points enabled (step 4 of its README).
 > - **Time:** ~2 h.
 
 Connection points build a reference cycle **by construction**: the source holds the sink so it can raise events, and the sink holds the source so it can unsubscribe. Nothing is wrong with either half.
 
-Here you wire one up, remove the `Unadvise`, and watch the trace show that *nothing is ever destroyed* — while the program keeps working perfectly. Then you do the same from PowerShell, because scripting hosts have the identical problem under a different name.
+Here you wire one up, remove the `Unadvise`, and watch the trace show that *nothing is ever destroyed* — while the program keeps working perfectly. Then you subscribe from a script, where the same cycle exists under a different name and the tooling to find it is thinner.
 
-1. Add `_ICalculatorEvents` with `OnProgress`, implement the connection point, add `SumTo`, and wire up the C++ sink from §5.7. Confirm the handler runs **ten times before `SumTo` returns** — print a line before and after the call to prove the ordering.
-2. Add the Module 1 ref-count tracing to both the source and the sink.
-3. **Remove the `Unadvise`.** Run. Observe in the trace: neither the sink nor the source is ever destroyed. Note that nothing *fails* — the program runs correctly and just leaks.
-4. Restore `Unadvise` via the `ConnectionCookie` RAII wrapper.
-5. Subscribe from **PowerShell** and confirm the same mechanism serves scripts:
+1. **Write the sink.** The server half already exists: Stage 4 gave you `_ICalculatorEvents`, the connection point, the `Fire_OnProgress` helper and a `SumTo` that calls it, and Lab 5.1 had you build and register the lot.
 
-```powershell
-$calc = New-Object -ComObject TrainingCalc.Calculator.1
-Register-ObjectEvent -InputObject $calc -EventName OnProgress -Action {
-    Write-Host "progress: $($EventArgs)%"
-}
-$calc.SumTo(1000000)
-Get-EventSubscriber | Unregister-Event      # the PowerShell equivalent of Unadvise
-```
+   What has never existed is anything on the **receiving** end. `SumTo(1000)` calls `Fire_OnProgress` ten times *today* — but `Fire_OnProgress` walks the connection point's list of subscribers, that list is empty, and so the ten notifications go nowhere at all. Every client you have written so far only ever called *into* the object. This lab is where you supply the other direction.
+
+   Add one more **Console App (C++)** to the Lab 5.1 solution, named `Client_Sink`, **Debug | x64**. It needs three things, in this order:
+
+   | | What | Where it comes from |
+   |---|---|---|
+   | a | the same `#import` line as `Client_Import` | Lab 5.1 |
+   | b | the `CalcSink` class, verbatim | §5.7 |
+   | c | the `main` below | here |
+
+   `#import` is what makes (b) compile: `named_guids` generates **`DIID__ICalculatorEvents`**, the IID of the event dispinterface, which `CalcSink::QueryInterface` must answer to and which you pass to `FindConnectionPoint`. Without it you would be writing that GUID out by hand.
+
+   ```cpp
+   #include <windows.h>
+   #include <atlbase.h>
+   #include <stdio.h>
+
+   #import "C:\\...\\TrainingCalc\\x64\\Debug\\TrainingCalc.dll" no_namespace named_guids
+
+   // ... paste CalcSink from §5.7 here ...
+
+   int main()
+   {
+       CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+       {
+           ICalculatorPtr calc;
+           HRESULT hr = calc.CreateInstance(CLSID_Calculator);
+           if (FAILED(hr)) { wprintf(L"CreateInstance 0x%08lX\n", hr); }
+           else
+           {
+               CComPtr<IConnectionPointContainer> cpc;
+               hr = calc->QueryInterface(IID_PPV_ARGS(&cpc));   // "do you raise events?"
+               wprintf(L"QI IConnectionPointContainer   0x%08lX\n", hr);
+
+               CComPtr<IConnectionPoint> cp;
+               hr = cpc->FindConnectionPoint(DIID__ICalculatorEvents, &cp);
+               wprintf(L"FindConnectionPoint            0x%08lX\n", hr);
+
+               CalcSink* sink = new CalcSink();                 // starts at m_cRef = 1
+               DWORD cookie = 0;
+               hr = cp->Advise(sink, &cookie);                  // source AddRefs -> 2
+               wprintf(L"Advise                         0x%08lX cookie=%lu\n", hr, cookie);
+               sink->Release();                                 // drop ours     -> 1
+
+               wprintf(L"--- before SumTo\n");
+               long total = calc->SumTo(1000);
+               wprintf(L"--- after SumTo, total=%ld\n", total);
+
+               hr = cp->Unadvise(cookie);                       // source Releases -> 0
+               wprintf(L"Unadvise                       0x%08lX\n", hr);
+           }
+       }
+       CoUninitialize();
+       return 0;
+   }
+   ```
+
+   ```text
+   QI IConnectionPointContainer   0x00000000
+   FindConnectionPoint            0x00000000
+   Advise                         0x00000000 cookie=1
+   --- before SumTo
+     [event] 10% done
+     [event] 20% done
+     ...
+     [event] 100% done
+   --- after SumTo, total=500500
+   Unadvise                       0x00000000
+   ```
+
+   Every `OnProgress` lands **between** the two `---` lines. Events are delivered synchronously, on your thread, inside the call you made — the source is still sitting in the middle of `SumTo` while your handler runs. That is the fact the rest of this lab depends on, and step 6's reentrancy drill is what happens when you abuse it.
+
+   > Call `SumTo(1000)`, not `SumTo(10)`. The Stage 4 implementation reports every 10% and skips the notification entirely for `n < 100`, so a small argument looks exactly like a sink that was never connected.
+2. **Make both lifetimes visible.** The leak in step 3 is silent — the program produces correct answers whether or not it leaks — so you need to *see* construction and destruction before you can see them stop happening. The two sides need different techniques, because you own one and ATL owns the other.
+
+   **The sink is yours**, so trace it directly. `CalcSink` already has `AddRef` and `Release` as one-liners — **delete those two and paste these in their place**, then add a destructor:
+
+   ```cpp
+   ~CalcSink() { wprintf(L"  [sink] destroyed\n"); }
+
+   ULONG STDMETHODCALLTYPE AddRef() override
+   {
+       LONG n = InterlockedIncrement(&m_cRef);
+       wprintf(L"  [sink] AddRef  -> %ld\n", n);
+       return n;
+   }
+   ULONG STDMETHODCALLTYPE Release() override
+   {
+       LONG n = InterlockedDecrement(&m_cRef);
+       wprintf(L"  [sink] Release -> %ld\n", n);
+       if (!n) delete this;                  // read n BEFORE this line, not after
+       return n;
+   }
+   ```
+
+   > Pasting these *alongside* the originals gives you `error C2535: member function already defined or declared`, pointing at the one-liners you meant to remove.
+
+   **The source is ATL's.** `CComObject` implements `AddRef`/`Release` for you and there is no clean place to put a print inside them — but you do not need one. ATL calls **`FinalConstruct`** when the object is created and **`FinalRelease`** when its reference count reaches zero. Birth and death, which is exactly what this lab is about. Both already exist in the generated `Calculator.h`, empty:
+
+   ```cpp
+   // Calculator.h, inside CCalculator - fill in the two the wizard left blank
+   HRESULT FinalConstruct() { wprintf(L"[source] constructed\n"); return S_OK; }
+   void    FinalRelease()   { wprintf(L"[source] destroyed\n"); }
+   ```
+
+   You do not need to add `#include <stdio.h>` — `framework.h` already includes `<atlbase.h>`, which pulls it in. If you ever see `C3861: 'wprintf': identifier not found` in a project that is not using ATL, that is the include you are missing.
+
+   > **The server's output appears on your client's console.** The DLL is loaded *into* your client process, and both link the same shared UCRT, so `[source]` and `[sink]` lines interleave with the client's own in the right order. No DebugView, no `OutputDebugString`, nothing to attach.
+
+   > **No, you do not need to register anything again.** A rebuild writes the same DLL to the same path under the same CLSID, so every registry entry still points at it. (ATL's *Register Output* re-runs `regsvr32` on each build anyway, harmlessly.) What *will* catch you is the opposite problem: **the build fails while a client is still running**, because the DLL is loaded and locked —
+   >
+   > ```text
+   > LNK1168: cannot open ...\TrainingCalc.dll for writing
+   > ```
+   >
+   > Close `Client_Sink` and any PowerShell session that ran `New-Object`, then build again. A PowerShell window holds the DLL until the object is released *and* the process exits.
+
+   **Now build and run.** Step 1's HRESULT prints have done their job; replace them with plain phase markers — `--- new CalcSink`, `--- Advise`, `--- our Release`, `--- Unadvise`, `--- end of scope` — so that every reference count below can be attributed to the call that caused it.
+
+   Everything still works. This is the healthy case, and it is the baseline step 3 will be a diff against:
+
+   ```text
+   [source] constructed
+   --- new CalcSink
+   --- Advise
+     [sink] AddRef  -> 2
+   --- our Release
+     [sink] Release -> 1
+   --- before SumTo
+     [sink] AddRef  -> 2
+     [sink] AddRef  -> 3
+     [event] 10% done
+     [sink] Release -> 2
+     [sink] Release -> 1
+     ...                       (the same five lines, eight more times)
+     [sink] AddRef  -> 2
+     [sink] AddRef  -> 3
+     [event] 100% done
+     [sink] Release -> 2
+     [sink] Release -> 1
+   --- after SumTo, total=500500
+   --- Unadvise
+     [sink] Release -> 0
+     [sink] destroyed
+   --- end of scope
+   [source] destroyed
+   ```
+
+   Read it line by line before moving on — every claim §5.7 made is sitting in this transcript:
+
+   | In the trace | What it proves |
+   |---|---|
+   | `AddRef -> 2` during `Advise` | the source took a **strong** reference to your sink. This is the half of the cycle you cannot see from the client. |
+   | `Release -> 1` immediately after | you dropped yours, and the sink did **not** die — the subscription alone is keeping it alive. |
+   | the count returns to **1** between every event | each callback is bracketed by a matched `AddRef`/`Release`, so the sink cannot be destroyed halfway through its own handler. The exact number of pairs is an ATL implementation detail; what matters is that it balances and never reaches zero. |
+   | `Release -> 0` at `Unadvise` | `Unadvise` is the **only** thing that destroys the sink. Nothing else was ever going to. |
+   | `[source] destroyed` last | the `ICalculatorPtr` released at end of scope, and the server object went with it. |
+
+   Both objects were created and both were destroyed. Keep this output somewhere you can compare against.
+3. **Remove the `Unadvise`.**
+
+   **3a. Watch it *not* leak.** Comment out `cp->Unadvise(cookie)` and run. Both objects are still destroyed:
+
+   ```text
+   --- Unadvise SKIPPED
+   --- end of scope
+   [source] destroyed
+     [sink] Release -> 0
+     [sink] destroyed
+   ```
+
+   That is not the lab going wrong. It is the most useful thing in it, and it is worth understanding before you go any further: **there is no cycle yet.** Every reference you have created so far points one way.
+
+   ```text
+   Client ──strong──► Source ──strong──► Sink
+   ```
+
+   When `calc` leaves scope the source's count reaches zero, and as the source is destroyed ATL's connection point releases every sink still sitting in its list. Forgetting `Unadvise` cost you nothing, because there was always something able to reach zero on its own.
+
+   Remember this when you read a bug report. "We never call `Unadvise`" is not, by itself, a leak.
+
+   **3b. Close the loop.** Give the sink a strong reference back to the source. This is not a contrivance to make the lab work — it is what real sinks look like. A sink almost always needs the object it is listening to: to read a property while handling the event, to `Unadvise` itself later, or simply because the sink *is* the client object that owns the source in the first place.
+
+   ```cpp
+   class CalcSink : public IDispatch
+   {
+       LONG m_cRef = 1;
+       CComPtr<ICalculator> m_source;              // add this
+   public:
+       void SetSource(ICalculator* p) { m_source = p; }    // CComPtr AddRefs
+       // ... rest unchanged ...
+   ```
+
+   and in `main`, immediately after `new CalcSink()`:
+
+   ```cpp
+   sink->SetSource(calc);
+   ```
+
+   Run again, still with no `Unadvise`:
+
+   ```text
+   [source] constructed
+   --- before SumTo
+     ... ten events, exactly as before ...
+   --- after SumTo, total=500500
+   --- Unadvise SKIPPED
+   --- end of scope
+   ```
+
+   And then nothing. **Neither `[source] destroyed` nor `[sink] destroyed` ever prints.** The program produced the right answer, exited cleanly, reported no error, and destroyed nothing:
+
+   ```text
+   Client ──strong──► Source ──strong──► Sink
+                        ▲                 │
+                        └─────strong──────┘
+   ```
+
+   The client dropped its reference and the source's count fell to one — the sink's. The sink's count is one — the source's. Each is keeping the other alive and neither can ever reach zero. One added line turned a program that cleaned up perfectly into one that cannot clean up at all, and **the only visible difference is two lines of output that no longer appear.**
+
+   This is the single most common leak in COM, and that is why: nothing fails.
+4. **Break the cycle, and make it impossible to forget.** Put the `Unadvise` back and both destructors return — `[sink] destroyed` first, because the sink's count reaches zero immediately, and `[source] destroyed` right after, once the sink's `m_source` has released too.
+
+   Then delete the `cp->Unadvise(cookie)` line again — this time replacing it with a destructor rather than with a leak. `ConnectionCookie` owns the whole subscription: it finds the connection point, `Advise`s, and `Unadvise`s when it goes out of scope. Paste it above `main` — this is §5.7's wrapper with the error handling written out, so it needs no `RETURN_IF_FAILED`:
+
+   ```cpp
+   class ConnectionCookie
+   {
+       CComPtr<IConnectionPoint> m_cp;
+       DWORD m_cookie = 0;
+   public:
+       HRESULT Advise(IUnknown* pSource, REFIID iid, IUnknown* pSink)
+       {
+           CComPtr<IConnectionPointContainer> cpc;
+           HRESULT hr = pSource->QueryInterface(IID_PPV_ARGS(&cpc));
+           if (FAILED(hr)) return hr;
+           hr = cpc->FindConnectionPoint(iid, &m_cp);
+           if (FAILED(hr)) return hr;
+           return m_cp->Advise(pSink, &m_cookie);
+       }
+       ~ConnectionCookie()
+       {
+           if (m_cp && m_cookie) m_cp->Unadvise(m_cookie);
+       }
+   };
+   ```
+
+   The `cpc`, `cp`, `Advise` and `Unadvise` lines all disappear from `main`, and four steps collapse into one:
+
+   ```cpp
+   int main()
+   {
+       CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+       {
+           ICalculatorPtr calc;
+           calc.CreateInstance(CLSID_Calculator);
+
+           CalcSink* sink = new CalcSink();
+           sink->SetSource(calc);                  // step 3b's back-reference - the cycle
+
+           ConnectionCookie cookie;                // declared AFTER calc
+           HRESULT hr = cookie.Advise(calc, DIID__ICalculatorEvents, sink);
+           wprintf(L"Advise 0x%08lX\n", hr);
+           sink->Release();
+
+           wprintf(L"--- before SumTo\n");
+           long total = calc->SumTo(1000);
+           wprintf(L"--- after SumTo, total=%ld\n", total);
+
+           wprintf(L"--- end of scope\n");
+       }                                           // ~ConnectionCookie -> ~CalcSink -> ~CCalculator
+       wprintf(L"=== done\n");
+       CoUninitialize();
+       return 0;
+   }
+   ```
+
+   ```text
+   [source] constructed
+     [sink] AddRef  -> 2
+   Advise 0x00000000
+     [sink] Release -> 1
+   --- before SumTo
+     ... ten events ...
+   --- after SumTo, total=500500
+   --- end of scope
+     [sink] Release -> 0
+     [sink] destroyed
+   [source] destroyed
+   === done
+   ```
+
+   Both objects destroyed again, with the cycle still in place — the wrapper broke it. Note that everything after `--- end of scope` happens with no code of yours running at all.
+
+   Declare `cookie` **after** `calc`, as above: destructors run in reverse order, so `Unadvise` fires while the source is still alive and the output reads in the natural order.
+
+   The point is not tidiness. A manual `Unadvise` is skipped by every early `return`, every thrown exception, and every future edit that adds one. A destructor is not. ATL offers `AtlAdvise`/`AtlUnadvise` and WIL has equivalents — but write this one once, because the wrapper is the only thing standing between step 3b and production.
+5. **Subscribe from a script.** Calling a method needed nothing but a ProgID string. Receiving an event is not the same problem, and this step is where that stops being an abstract claim.
+
+   **5a. Try the obvious thing, and watch it fail.**
+
+   ```powershell
+   $calc = New-Object -ComObject TrainingCalc.Calculator.1
+   $calc | Get-Member -MemberType Event
+   Register-ObjectEvent -InputObject $calc -EventName OnProgress -Action {
+       Write-Host "progress: $($EventArgs)%"
+   }
+   ```
+
+   ```text
+   Cannot register for the specified event. An event with the name 'OnProgress' does not exist.
+   ```
+
+   `Get-Member` lists no events at all. `New-Object -ComObject` returns a `System.__ComObject` — a wrapper holding an `IDispatch` pointer and **no type information**. `GetIDsOfNames` can resolve a method name at the moment you call it, but there is no equivalent for "tell me what events you raise", so there is nothing for `Register-ObjectEvent` to bind to. Run it in Windows PowerShell 5.1 as well if you like; the message is identical.
+
+   **5b. VBScript needs no extra machinery at all.**
+
+   ```vbscript
+   Set calc = WScript.CreateObject("TrainingCalc.Calculator.1", "calc_")
+   WScript.Echo "SumTo(1000) = " & calc.SumTo(1000)
+
+   Sub calc_OnProgress(percent)
+       WScript.Echo "  OnProgress " & percent
+   End Sub
+   ```
+
+   ```text
+     OnProgress 10
+     OnProgress 20
+     ...
+     OnProgress 100
+   SumTo(1000) = 500500
+   ```
+
+   The second argument to `WScript.CreateObject` is a **prefix**. WSH reads the coclass's `[default, source]` dispinterface out of the type library, implements a sink for it, calls `Advise`, and routes each incoming DISPID to a sub named `<prefix><EventName>`. Everything you wrote by hand in §5.7, done by the host.
+
+   Note the ordering: all ten events print **before** `SumTo` returns. That is step 1's lesson again, now with no C++ in sight.
+
+   **5c. PowerShell can do it — once it has a type.**
+
+   Rebuild Lab 5.1's `Client_CSharp` project with `<EmbedInteropTypes>false</EmbedInteropTypes>` on the COM reference. That leaves an **`Interop.TrainingCalcLib.dll`** in its output folder: a real .NET assembly, generated from the type library, in which the source dispinterface has become ordinary .NET events.
+
+   ```powershell
+   Add-Type -Path .\Interop.TrainingCalcLib.dll
+   $calc = New-Object TrainingCalcLib.CalculatorClass
+   $calc | Get-Member -MemberType Event | ForEach-Object Name     # OnError, OnProgress
+
+   Register-ObjectEvent -InputObject $calc -EventName OnProgress -SourceIdentifier p1
+   $calc.SumTo(1000)
+   Get-Event -SourceIdentifier p1 | ForEach-Object { "  OnProgress " + $_.SourceArgs[0] }
+
+   Get-EventSubscriber | Unregister-Event      # the PowerShell equivalent of Unadvise
+   ```
+
+   Ten events, in both hosts. Nothing about the *server* changed between 5a and 5c — only whether the caller had type information. Late binding was enough to **call** this object; it was never enough to **listen** to it.
+
+   Leave out the `Unregister-Event` and you have rebuilt this lab's leak in a scripting host: the subscription holds a reference to the object, the object holds the sink, and neither is collected while the session lives. `Get-EventSubscriber` is your `Unadvise` audit.
 
 6. **Support drill:** deliberately fire an event from the source while the sink's `Invoke` calls back into the source. On an STA, this is reentrancy (Module 3). Observe what happens, and note the fix (queue the notification instead of firing synchronously).
 
