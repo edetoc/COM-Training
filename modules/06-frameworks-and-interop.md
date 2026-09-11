@@ -427,7 +427,7 @@ Always declare an explicit interface and set `ClassInterface(ClassInterfaceType.
 ```xml
 <!-- .csproj for .NET 5+ COM server -->
 <PropertyGroup>
-  <TargetFramework>net8.0-windows</TargetFramework>
+  <TargetFramework>net10.0-windows</TargetFramework>
   <EnableComHosting>true</EnableComHosting>
 </PropertyGroup>
 ```
@@ -521,7 +521,7 @@ Understanding that `CComObject<T>` is the thing actually instantiated (not `T`) 
 ## 6.8 LAB 6.2 — Cross-language interop, both directions
 
 > **Requirements**
-> - **Tools:** the **.NET SDK** (.NET 8 or later) for the `EnableComHosting` path, **and** the .NET Framework 4.x developer pack if you want to compare `regasm`/`tlbimp` — those tools are Framework-only and their absence is itself a support lesson. Visual Studio C++ for the native client.
+> - **Tools:** the **.NET SDK** for the `EnableComHosting` path — the labs use **.NET 10**, and the feature works on .NET 5 and later — **and** the .NET Framework 4.x developer pack if you want to compare `regasm`/`tlbimp` — those tools are Framework-only and their absence is itself a support lesson. Visual Studio C++ for the native client.
 > - **Elevation:** required — `regsvr32` on the generated `*.comhost.dll`.
 > - **Bitness:** the comhost is **architecture-specific**. Publish it for the same architecture as the calling client (`-r win-x64`), or you reproduce `0x80040154`.
 > - **Depends on:** the Lab 6.1 ATL server for Direction 2.
@@ -536,7 +536,7 @@ It mostly holds, and the interesting part is where it does not: the seams show u
 ### Direction 1: C# server, C++ client
 
 ```csharp
-// NetCalc.cs, .NET Framework or .NET 8 with EnableComHosting
+// NetCalc.cs, .NET Framework or .NET 10 with EnableComHosting
 [ComVisible(true), Guid("B1B2C3D4-0001-...")]
 [InterfaceType(ComInterfaceType.InterfaceIsDual)]
 public interface INetCalculator { [DispId(1)] int Add(int a, int b); }
@@ -666,7 +666,7 @@ Because RCWs for `books`, `book`, and any un-named intermediates still hold refe
 4. A C# COM server uses `[ClassInterface(ClassInterfaceType.AutoDual)]`. A developer adds a public method. What breaks, and why is this exactly the problem COM was designed to prevent?
 5. What is the difference between `Marshal.ReleaseComObject` and `Marshal.FinalReleaseComObject`, and when is either appropriate?
 6. Two C# variables reference "the same" COM object obtained by two separate calls. How does the CLR know to give them the same RCW, and which Module 1 rule does that depend on?
-7. A customer runs `regasm` on a .NET 8 assembly and it fails. What's your answer?
+7. A customer runs `regasm` on a .NET 10 assembly and it fails. What's your answer?
 8. Why does `COM_INTERFACE_ENTRY2` exist?
 
 <details>

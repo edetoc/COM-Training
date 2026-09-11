@@ -312,7 +312,7 @@ Get-AppxLog -ActivityId <id>          # deployment failures, in detail
 2. Server application vs library application — what do you gain and lose with each?
 3. `SetComplete` does two things. What are they?
 4. A customer's distributed transaction fails between two servers. What are your first two questions?
-5. A .NET Framework app uses `ServicedComponent`. They're porting to .NET 8. What do you tell them?
+5. A .NET Framework app uses `ServicedComponent`. They're porting to .NET 10. What do you tell them?
 6. In what sense is WinRT "just COM"? Name three things that changed and one that didn't.
 7. What is ASTA, and which Module 3 problem does it exist to eliminate?
 8. A WinUI app throws `RPC_E_CANTCALLOUT_ININPUTSYNCCALL`. What did the developer almost certainly do?

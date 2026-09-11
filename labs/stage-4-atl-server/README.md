@@ -108,7 +108,7 @@ interface ICalculator : IDispatch
     [id(4)] HRESULT SumTo([in] LONG n, [out, retval] LONG* total);
     [id(5)] HRESULT Describe([out, retval] BSTR* description);
     [propget, id(6)] HRESULT Precision([out, retval] LONG* pVal);
-    [propput, id(5)] HRESULT Precision([in] LONG newVal);
+    [propput, id(6)] HRESULT Precision([in] LONG newVal);
 };
 ```
 

@@ -942,7 +942,7 @@ ATL's `CComEnumOnSTL` / `IEnumOnSTLImpl` implement `IEnumVARIANT` over an STL co
 ## 5.9 LAB 5.1 — A dual interface driven from four languages
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ (for `#import`); **either** Windows PowerShell 5.1 **or** PowerShell 7 — late binding behaves the same in both, so one is enough; `cscript.exe` for the VBScript client; the **.NET SDK** for the C# client.
+> - **Tools:** Visual Studio C++ (for `#import`); **either** Windows PowerShell 5.1 **or** PowerShell 7 — late binding behaves the same in both, so one is enough; `cscript.exe` for the VBScript client; the **.NET SDK** for the C# client, built from Visual Studio rather than `dotnet build` (see the C# section for why).
 > - **VBScript:** on Windows 11 24H2 and later VBScript is an **optional feature on demand**, not installed by default. If `cscript test.vbs` fails, add it under *Settings → System → Optional features → VBSCRIPT*. It is deprecated — you learn it to support the customers still running it, not to write new code.
 > - **Elevation:** yes — **run Visual Studio as administrator**. An ATL DLL project has **Register Output** switched on by default, so every successful build runs `regsvr32` on the result, and that writes the CLSID, ProgID and type library to `HKLM\Software\Classes`. Without elevation the build itself succeeds and the registration step fails. (To work without admin, see the per-user option in the Stage 4 README.) Late binding by ProgID needs the CLSID; `#import` and early-bound C# need the TLB.
 > - **Bitness:** register x64 and use the 64-bit hosts — `%SystemRoot%\System32\cscript.exe` is 64-bit, `%SystemRoot%\SysWOW64\cscript.exe` is 32-bit. Picking the wrong one reproduces Lab 2.2's error, which is a useful accident.
@@ -967,36 +967,97 @@ You build a `Calculator` with a **dual** interface, then call it from C++ (early
 
 What to take away is not the code — it is which capability each caller depends on. When a customer says "it works in C# but not in VBScript," this lab is how you already know where to look.
 
+### Step 1 — create the client projects
+
+The server is a DLL, so every client is a separate program of its own. Three of them need a project; two do not.
+
+| Client | Create | Name it |
+|---|---|---|
+| C++ `#import` | **Console App (C++)** | `Client_Import` |
+| C++ raw `IDispatch` | **Console App (C++)** | `Client_Dispatch` |
+| PowerShell | a `.ps1` file — no project | `client.ps1` |
+| VBScript | a `.vbs` file — no project | `client.vbs` |
+| C# | **Console App (C#)** | `Client_CSharp` |
+
+Add the three projects to the **same solution as `TrainingCalc`** (right-click the solution → **Add → New Project**). You then have one place to set breakpoints on both sides of the call, which is exactly what *What to compare* at the end of this lab asks for. Set each C++ client to **Debug | x64**: a 32-bit client cannot load the x64 server in-proc (Module 2 §2.3).
+
+Nothing else is needed — no extra linker input, no include directories, no references.
+
+> **Which C++ toolset?** Visual Studio 2026 asks you to choose between the **Latest** toolset (v14.51) and the **LTS** toolset (v14.50). **Take either — and it does not have to match the toolset the server was built with.**
+>
+> That is worth a pause rather than a shrug, because it is the whole point of COM. Client and server meet at a vtable of `HRESULT`-returning functions and nothing else: no C++ name mangling in common, no shared CRT, no shared allocator, no shared header. A toolset mismatch *cannot* break it — which is precisely why the PowerShell and VBScript clients below can call the same object without a compiler at all. Pass a `std::string` across that boundary instead and every one of those guarantees disappears at once (Module 0 §0.1).
+>
+> If you want to see it rather than take it on trust, build one C++ client on Latest and the other on LTS. Both work.
+
 ### C++ early bound (`#import`)
 
+`#import` reads a type library and generates two headers next to your object files — `TrainingCalc.tlh` (declarations) and `TrainingCalc.tli` (inline wrapper bodies) — then includes them. You do not write a single interface declaration yourself.
+
+Point it at the **DLL**, not at a `.tlb` file. ATL embeds the type library inside the DLL as a resource, which is how `DllRegisterServer` was able to register it in the first place, so there is no separate file to go hunting for:
+
 ```cpp
-#import "Calculator.tlb" no_namespace named_guids
-// generates Calculator.tlh / .tli with smart pointers and wrapper methods
+#include <windows.h>
+#include <stdio.h>
+
+// Use the path to the DLL you registered. Double the backslashes, or use forward slashes.
+#import "C:\\Users\\you\\source\\repos\\TrainingCalc\\x64\\Debug\\TrainingCalc.dll" \
+    no_namespace named_guids
 
 int main()
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     {
-        ICalculatorPtr calc;                     // _com_ptr_t from #import
-        calc.CreateInstance(CLSID_Calculator);
-        long r = calc->Add(2, 3);                // [retval] becomes the return value!
-        wprintf(L"Add -> %ld\n", r);
-        wprintf(L"Describe -> %s\n", (LPCWSTR)calc->Describe());
+        ICalculatorPtr calc;                        // _com_ptr_t, generated by #import
+        HRESULT hr = calc.CreateInstance(CLSID_Calculator);   // named_guids gives you this name
+        if (FAILED(hr))
+        {
+            wprintf(L"CreateInstance failed 0x%08lX\n", hr);
+        }
+        else
+        {
+            long r = calc->Add(2, 3);               // [retval] becomes the return value!
+            wprintf(L"Add -> %ld\n", r);
+            wprintf(L"Describe -> %s\n", (LPCWSTR)calc->Describe());
+
+            try { calc->Divide(10, 0); }
+            catch (const _com_error& e)             // a failed HRESULT is thrown, not returned
+            {
+                wprintf(L"Divide -> %s\n", (LPCWSTR)e.Description());
+            }
+        }
     }
     CoUninitialize();
+    return 0;
 }
 ```
 
-Note how `#import` turns `HRESULT Add([in] LONG, [in] LONG, [out,retval] LONG*)` into `long Add(long, long)` that throws `_com_error` on failure. Look at the generated `.tlh` to see exactly how.
+Three things that surprise people the first time:
+
+- `#import` turns `HRESULT Add([in] LONG, [in] LONG, [out, retval] LONG*)` into `long Add(long, long)`. The `HRESULT` does not vanish — a failure is turned into a thrown `_com_error`, which is why the `Divide` call above is wrapped in `try`. (The console app template already compiles with `/EHsc`, so this needs no project change.)
+- `named_guids` is what gives you the names `CLSID_Calculator` and `IID_ICalculator`. Without it you write `__uuidof(Calculator)`.
+- The braces around the body matter: `ICalculatorPtr` must release before `CoUninitialize` runs. That is the same bug you hit in Lab 3.1.
+
+Open the generated `TrainingCalc.tlh` and read it. It is the clearest possible answer to "what does a type library actually contain" — and it is generated, so it cannot be out of date with the server.
 
 ### C++ late bound (raw `IDispatch`)
 
 Write this by hand once. It's tedious, and that's the lesson.
 
+This is the `Client_Dispatch` project, and it is the whole program — there is no `#import`, no type library, and no generated header anywhere in it. It knows two things about the server: a ProgID string and a method name. That is exactly what PowerShell and VBScript know, which is why this client is worth writing: **everything the scripting hosts do for you is in here, spelled out.**
+
+It needs `#include <atlbase.h>` for `CComVariant` (installed with ATL in Stage 4) and the `RETURN_IF_FAILED` macro from Module 1 §1.5.
+
 ```cpp
-HRESULT CallAddLateBound(IDispatch* pDisp, long a, long b, long* pResult)
+#include <windows.h>
+#include <atlbase.h>
+#include <stdio.h>
+
+#define RETURN_IF_FAILED(x) do { HRESULT _hr = (x); if (FAILED(_hr)) return _hr; } while (0)
+
+// Calls any method taking two LONGs and returning a LONG - by name, with no header.
+HRESULT CallLateBound(IDispatch* pDisp, LPCOLESTR method, long a, long b, long* pResult)
 {
-    OLECHAR* name = const_cast<OLECHAR*>(L"Add");
+    OLECHAR* name = const_cast<OLECHAR*>(method);
     DISPID dispid = 0;
     RETURN_IF_FAILED(pDisp->GetIDsOfNames(IID_NULL, &name, 1,
                                           LOCALE_USER_DEFAULT, &dispid));
@@ -1015,15 +1076,84 @@ HRESULT CallAddLateBound(IDispatch* pDisp, long a, long b, long* pResult)
     if (FAILED(hr))
     {
         if (hr == DISP_E_EXCEPTION)
-            wprintf(L"server error: %s\n", excep.bstrDescription ? excep.bstrDescription : L"");
+        {
+            wprintf(L"  server error: %s (scode 0x%08lX)\n",
+                    excep.bstrDescription ? excep.bstrDescription : L"(none given)",
+                    excep.scode);
+            SysFreeString(excep.bstrSource);        // EXCEPINFO strings are YOURS to free
+            SysFreeString(excep.bstrDescription);
+            SysFreeString(excep.bstrHelpFile);
+        }
         else if (hr == DISP_E_TYPEMISMATCH)
-            wprintf(L"bad type for argument %u\n", argErr);
+        {
+            wprintf(L"  bad type for argument %u\n", argErr);
+        }
         return hr;
     }
+
     *pResult = result.lVal;
     return S_OK;
 }
+
+int main()
+{
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    {
+        CLSID clsid;
+        HRESULT hr = CLSIDFromProgID(L"TrainingCalc.Calculator.1", &clsid);
+        if (FAILED(hr))
+        {
+            wprintf(L"ProgID not registered: 0x%08lX\n", hr);
+        }
+        else
+        {
+            CComPtr<IDispatch> disp;
+            hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&disp));
+            if (FAILED(hr))
+            {
+                wprintf(L"CoCreateInstance failed: 0x%08lX\n", hr);
+            }
+            else
+            {
+                long r = 0;
+
+                hr = CallLateBound(disp, L"Add", 2, 3, &r);
+                wprintf(L"Add(2,3)       hr=0x%08lX  r=%ld\n", hr, r);
+
+                hr = CallLateBound(disp, L"Divide", 10, 0, &r);   // the server raises
+                wprintf(L"Divide(10,0)   hr=0x%08lX\n", hr);
+
+                hr = CallLateBound(disp, L"Multiply", 6, 7, &r);  // no such member
+                wprintf(L"Multiply(6,7)  hr=0x%08lX\n", hr);
+            }
+        }
+    }
+    CoUninitialize();
+    return 0;
+}
 ```
+
+The last two calls are there to give you the two failures you will spend your career reading:
+
+```text
+Add(2,3)       hr=0x00000000  r=5
+  server error: Cannot divide by zero. (scode 0x80070057)
+Divide(10,0)   hr=0x80020009
+Multiply(6,7)  hr=0x80020006
+```
+
+| Call | HRESULT | Where it came from |
+|---|---|---|
+| `Divide(10, 0)` | `0x80020009` `DISP_E_EXCEPTION` | The **method ran** and failed. The detail is in `EXCEPINFO`, not in the HRESULT. |
+| `Multiply(6, 7)` | `0x80020006` `DISP_E_UNKNOWNNAME` | `GetIDsOfNames` failed. The method never ran, and the server never saw the call. |
+
+That distinction is the whole reason late binding has two steps. `DISP_E_UNKNOWNNAME` means the *name* is wrong — a typo, or a client written against a newer version of the server. `DISP_E_EXCEPTION` means the name was fine and the object objected. A customer reporting "it can't find the method" and a customer reporting "the method threw" are in completely different places.
+
+Follow the description in that transcript back to its source. `Cannot divide by zero.` is the literal string from the `Error(...)` call you wrote in the Stage 4 server, and `scode 0x80070057` is the `E_INVALIDARG` you passed alongside it. `ISupportErrorInfo` carried both across to a caller that has never seen your header — which is the same route they take to reach `$_.Exception.Message` in PowerShell and `Err.Description` in VBScript, a few sections below.
+
+> **`bstrDescription` can be empty.** You get it here only because the server went to the trouble; an object that just returns a failed HRESULT leaves you `scode` and nothing else. Print both and never assume the description is there.
+
+Now count what you wrote. Roughly sixty lines to call `Add(2, 3)` — and PowerShell does the same thing in one. That is not PowerShell being clever; it is PowerShell running this code on your behalf, every single call.
 
 ### PowerShell
 
@@ -1032,27 +1162,81 @@ $calc = New-Object -ComObject TrainingCalc.Calculator.1
 $calc.Add(2, 3)
 $calc.Precision = 4          # property put
 $calc.Precision              # property get
-"$calc"                      # invokes DISPID_VALUE (Describe)
+$calc.Describe()
+$calc.SumTo(10)
 
 try { $calc.Divide(10, 0) } catch { $_.Exception.Message }   # IErrorInfo surfaces here
 
-[Runtime.InteropServices.Marshal]::ReleaseComObject($calc) | Out-Null
+[Runtime.InteropServices.Marshal]::ReleaseComObject($calc)
 ```
+
+```text
+5
+4
+Training Calculator 1.0
+55
+Cannot divide by zero.
+0
+```
+
+Six lines of output for six lines of script, and not one line of type information anywhere — no header, no type library reference, no `Add-Type`. `New-Object -ComObject` took a ProgID string; everything after it went through `GetIDsOfNames` and `Invoke`, exactly as your `Client_Dispatch` project does by hand.
+
+Two of those lines are worth stopping on:
+
+- **`Cannot divide by zero.`** is the string you passed to `Error(...)` in the C++ server, arriving as a first-class PowerShell exception message. Nothing in between translated it; `ISupportErrorInfo` carried it.
+- **The trailing `0`** is what `ReleaseComObject` returns: the reference count *remaining* after it released. Zero means the object is gone. If you see anything else, something is still holding a reference — which is how Lab 5.2's leak announces itself.
+
+> **`"$calc"` does not call `Describe`.** It prints `System.__ComObject`. Interpolation asks .NET's runtime-callable wrapper for a string, and that wrapper answers with its own type name without consulting the object at all. In PowerShell, call `$calc.Describe()` and mean it. The default member is a *scripting* convenience, and the next section is where you can actually see it.
 
 ### VBScript
 
 ```vbscript
 Set calc = CreateObject("TrainingCalc.Calculator.1")
-WScript.Echo calc.Add(2, 3)
+WScript.Echo "Add(2,3)   = " & calc.Add(2, 3)
 calc.Precision = 4
-WScript.Echo calc                        ' default member
+WScript.Echo "Precision  = " & calc.Precision
+WScript.Echo "Describe() = " & calc.Describe()
 
 On Error Resume Next
 calc.Divide 10, 0
-If Err.Number <> 0 Then WScript.Echo "Error: " & Err.Description
+If Err.Number <> 0 Then
+    WScript.Echo "Divide     -> " & Hex(Err.Number) & " " & Err.Description
+End If
 ```
 
+Run it with the **64-bit** host to match the server (Module 2 §2.3):
+
+```text
+C:\> %SystemRoot%\System32\cscript.exe //nologo client.vbs
+Add(2,3)   = 5
+Precision  = 4
+Describe() = Training Calculator 1.0
+Divide     -> 80070057 Cannot divide by zero.
+```
+
+Compare that last line with what `Client_Dispatch` printed for the same call. C++ got `DISP_E_EXCEPTION` (`0x80020009`) and had to dig `scode` and `bstrDescription` out of `EXCEPINFO` itself. VBScript reports `Err.Number = 80070057` and `Err.Description = Cannot divide by zero.` — it has thrown away the `DISP_E_EXCEPTION` wrapper and handed you the two `EXCEPINFO` fields directly. Same bytes, unpacked for you.
+
+> **The default member is missing here, on purpose.** Try adding `WScript.Echo calc` on its own and you get:
+>
+> ```text
+> Object doesn't support this property or method
+> ```
+>
+> — error `1B6`, because the Stage 4 wizard gave `Describe` the DISPID `5`, and a default member must be DISPID `0`. Change it to `[id(DISPID_VALUE)]` in `TrainingCalc.idl`, rebuild, and the bare `WScript.Echo calc` starts working. That is §5.3's `DISPID_VALUE` discussion, in the one language where you can watch it switch on and off.
+
 ### C#
+
+Two clients in one project. Set the target framework to **`net10.0-windows`** and **Platform target = x64**:
+
+```xml
+<PropertyGroup>
+  <OutputType>Exe</OutputType>
+  <TargetFramework>net10.0-windows</TargetFramework>
+  <PlatformTarget>x64</PlatformTarget>
+</PropertyGroup>
+```
+
+The `-windows` suffix is not strictly required — a plain `net10.0` target still builds and runs — but it declares the truth, and without it every COM call raises `CA1416: 'Type.GetTypeFromProgID(string)' is only supported on: 'windows'`. Any supported .NET works here; pick the current LTS.
 
 ```csharp
 // Late bound - no reference needed
@@ -1064,6 +1248,17 @@ Console.WriteLine(calc.Add(2, 3));
 var calc2 = new TrainingCalcLib.Calculator();
 Console.WriteLine(calc2.Add(2, 3));
 ```
+
+For the early-bound half, right-click the project → **Add → COM Reference** → *TrainingCalc 1.0 Type Library*. It appears in that list only because `regsvr32` registered the type library, so if it is not there, go back to the Stage 4 README step 6.
+
+> **Build the early-bound client from Visual Studio, not from `dotnet build`.** Resolving a COM reference means running `tlbimp`, and that step exists only in the .NET Framework MSBuild. `dotnet build` and `dotnet run` fail with:
+>
+> ```
+> error MSB4803: The task "ResolveComReference" is not supported on the .NET Core
+> version of MSBuild. Please use the .NET Framework version of MSBuild.
+> ```
+>
+> Build from the IDE, or from a Developer PowerShell with `msbuild Client_CSharp.csproj`. The **late-bound** half has no such restriction — it needs no reference at all, so `dotnet run` is fine for it.
 
 ### What to compare
 
