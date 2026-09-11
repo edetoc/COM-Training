@@ -350,7 +350,7 @@ Implement a connection point, subscribe a sink, and confirm callbacks. Then remo
   - `ComWrappers` (modern, .NET 5+) and source-generated COM interop (`GeneratedComInterface`) — the direction .NET is moving.
   - Registration for .NET servers: `regasm`, and why COM-visible .NET is different on .NET Core/5+.
 
-**Lab 6.1** — Rewrite the Module 2 server in ATL. Compare the line count and note exactly which boilerplate each macro replaced.
+**Lab 6.1** — Compare the hand-written Module 2 server with the ATL one you already built in Module 5. Count the line difference and note exactly which boilerplate each macro replaced.
 
 **Lab 6.2** — Build a C# COM server, consume it from C++; build a C++ COM server, consume it from C#. Register both ways. Then repeat with **NoPIA / embedded interop types**.
 
