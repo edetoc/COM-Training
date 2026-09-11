@@ -154,7 +154,7 @@ HKCR
     {
         ForceRemove {A1B2C3D4-1111-4000-9000-000000000001} = s 'Calculator Component'
         {
-            ProgID = s 'Training.Calculator.1'
+            ProgID = s 'TrainingCalc.Calculator.1'
             VersionIndependentProgID = s 'Training.Calculator'
             ForceRemove 'Programmable'
             InprocServer32 = s '%MODULE%'
@@ -165,7 +165,7 @@ HKCR
             'TypeLib' = s '{A1B2C3D4-9999-4000-9000-000000000099}'
         }
     }
-    Training.Calculator.1 = s 'Calculator Component'
+    TrainingCalc.Calculator.1 = s 'Calculator Component'
     {
         CLSID = s '{A1B2C3D4-1111-4000-9000-000000000001}'
     }
@@ -558,7 +558,7 @@ var calc = new TrainingCalcLib.Calculator();
 Console.WriteLine(calc.Add(2, 3));
 
 // b) Late bound
-Type t = Type.GetTypeFromProgID("Training.Calculator.1");
+Type t = Type.GetTypeFromProgID("TrainingCalc.Calculator.1");
 dynamic d = Activator.CreateInstance(t);
 Console.WriteLine(d.Add(2, 3));
 
@@ -579,9 +579,9 @@ Build the C# client with `<EmbedInteropTypes>false</EmbedInteropTypes>`, deploy 
 
 > **Requirements**
 > - **Tools:** the .NET SDK and the Visual Studio debugger. Run each case in the debugger — several of these bugs are only visible as a *timing* difference in when the finalizer runs.
-> - **Elevation:** required once, to register `Training.Calculator.1`.
+> - **Elevation:** required once, to register `TrainingCalc.Calculator.1`.
 > - **Bitness:** match the registered server.
-> - **Depends on:** a registered `Training.Calculator.1` (Lab 6.1) with the Module 1 ref-count tracing still compiled in.
+> - **Depends on:** a registered `TrainingCalc.Calculator.1` (Lab 6.1) with the Module 1 ref-count tracing still compiled in.
 > - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/), registered, with a `Trace` call added to its `AddRef`/`Release` so you can see when the RCW really releases.
 > - **Time:** ~1 h.
 
@@ -597,7 +597,7 @@ class Program
 {
     static void Main()
     {
-        Type t = Type.GetTypeFromProgID("Training.Calculator.1");
+        Type t = Type.GetTypeFromProgID("TrainingCalc.Calculator.1");
 
         // --- Bug 1: use after ReleaseComObject ---
         dynamic calc = Activator.CreateInstance(t);

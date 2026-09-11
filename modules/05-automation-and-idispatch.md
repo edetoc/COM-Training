@@ -31,7 +31,7 @@ How a language with no headers and no vtables calls a COM object at all: `IDispa
 **Late binding** — the client has only a name string at runtime:
 
 ```vbscript
-Set obj = CreateObject("Training.Calculator.1")
+Set obj = CreateObject("TrainingCalc.Calculator.1")
 result = obj.Add(2, 3)          ' "Add"? Never heard of it until this instant.
 ```
 
@@ -103,14 +103,20 @@ Note the last line: even a purely late-bound script client is doing `AddRef`/`Re
 
 ### `wFlags`
 
-| Flag | Meaning |
-|---|---|
-| `DISPATCH_METHOD` | `obj.Foo(1)` |
-| `DISPATCH_PROPERTYGET` | `x = obj.Foo` |
-| `DISPATCH_PROPERTYPUT` | `obj.Foo = 5` |
-| `DISPATCH_PROPERTYPUTREF` | `Set obj.Foo = other` (assign by reference) |
+This is the fourth parameter of `Invoke`, and the **caller** supplies it — the script engine, PowerShell, or the CLR.
 
-A member can be several at once — hence the flags are a bitmask, and `DISPATCH_METHOD | DISPATCH_PROPERTYGET` is common for members that could be either (a script engine often can't tell).
+Its job is to say what the caller is trying to *do*. `dispIdMember` names **which member**; `wFlags` says **read it, write it, or call it**. Both are needed, because `GetIDsOfNames` maps a name to a DISPID and one name can be used several ways: `obj.Value`, `obj.Value = 5` and `obj.Value(2)` all arrive with the *same* DISPID.
+
+| Flag | The caller wrote | What your `Invoke` should do |
+|---|---|---|
+| `DISPATCH_METHOD` | `obj.Foo(1)` | Call the method |
+| `DISPATCH_PROPERTYGET` | `x = obj.Foo` | Return the property's value |
+| `DISPATCH_PROPERTYPUT` | `obj.Foo = 5` | Assign the value |
+| `DISPATCH_PROPERTYPUTREF` | `Set obj.Foo = other` | Assign an *interface pointer*, not a copied value |
+
+A member can be several of these at once, so the flags are a bitmask. `DISPATCH_METHOD | DISPATCH_PROPERTYGET` is common: some languages cannot tell a no-argument method call from a property read, so they ask for either and let the object decide.
+
+If you implement `Invoke` by hand you must branch on this. If you delegate to `ITypeInfo::Invoke` — as §5.4 does — it reads the type library and does the branching for you, which is one of the better reasons not to write `Invoke` by hand.
 
 ### `DISPPARAMS` — and its two traps
 
@@ -124,17 +130,21 @@ typedef struct tagDISPPARAMS {
 ```
 
 1. **Arguments are in reverse order.** `rgvarg[0]` is the *last* argument. This trips up everyone once.
-2. **Property puts use a named argument.** For `DISPATCH_PROPERTYPUT`, the value is passed with the special DISPID `DISPID_PROPERTYPUT` (`-3`) in `rgdispidNamedArgs`:
+2. **Property puts use a named argument.**
+
+   > A **named argument** is one the caller identifies by name rather than by position — `cells.Item(Row:=1, Column:=2)` in VBA, instead of `cells.Item(1, 2)`. Since `Invoke` deals in DISPIDs rather than names, each named argument carries a DISPID: `rgdispidNamedArgs[i]` gives the DISPID for `rgvarg[i]`, and named arguments occupy the **first** `cNamedArgs` slots of `rgvarg`. Everything after them is positional.
+
+   A property assignment reuses that mechanism. The value being assigned is passed as a named argument with the reserved DISPID `DISPID_PROPERTYPUT` (`-3`), which is how the object tells "the new value" apart from any ordinary arguments the property may also take:
 
 ```cpp
 VARIANT v; v.vt = VT_I4; v.lVal = 42;
 DISPID putid = DISPID_PROPERTYPUT;
-DISPPARAMS dp = { &v, &putid, 1, 1 };
+DISPPARAMS dp = { &v, &putid, 1, 1 };      // 1 argument, and it is a named one
 pDisp->Invoke(dispidPrecision, IID_NULL, lcid, DISPATCH_PROPERTYPUT,
               &dp, nullptr, &excep, nullptr);
 ```
 
-Forgetting the named argument gives `DISP_E_PARAMNOTOPTIONAL` or `DISP_E_BADPARAMCOUNT`.
+Forgetting the named argument — passing `{ &v, nullptr, 1, 0 }` — gives `DISP_E_PARAMNOTOPTIONAL` or `DISP_E_BADPARAMCOUNT`.
 
 ### Well-known DISPIDs
 
@@ -159,7 +169,7 @@ A **dual** interface derives from `IDispatch` *and* declares its methods in the 
 ```
   IUnknown          slots 0-2   QueryInterface, AddRef, Release
   IDispatch         slots 3-6   GetTypeInfoCount, GetTypeInfo, GetIDsOfNames, Invoke
-  ICalculator       slots 7+    Add, Subtract, get_Precision, put_Precision
+  ICalculator       slots 7+    Add, Subtract, get_Precision, put_Precision, SumTo, Describe
 ```
 
 ```idl
@@ -176,6 +186,7 @@ interface ICalculator : IDispatch
     [id(2)] HRESULT Subtract([in] LONG a, [in] LONG b, [out, retval] LONG* result);
     [id(3), propget] HRESULT Precision([out, retval] LONG* value);
     [id(3), propput] HRESULT Precision([in] LONG value);
+    [id(4)] HRESULT SumTo([in] LONG n, [out, retval] LONG* total);   // slow on purpose (§5.7)
     [id(DISPID_VALUE)] HRESULT Describe([out, retval] BSTR* text);   // default member
 }
 ```
@@ -194,7 +205,20 @@ interface ICalculator : IDispatch
 
 ## 5.4 Implementing `IDispatch` the easy way
 
-You almost never hand-write `GetIDsOfNames`/`Invoke`. Instead, delegate to the type library:
+You almost never hand-write `GetIDsOfNames`/`Invoke`.
+
+Consider what a hand-written `Invoke` would have to do. Given DISPID 1, `DISPATCH_METHOD`, and a `DISPPARAMS` holding two `VARIANT`s, it must: check the DISPID is one you recognise, check `wFlags` is a use that member supports, check the argument count, coerce each `VARIANT` to the type the method actually takes (the script may have passed a `VT_BSTR` where you want a `LONG`), remember the arguments are in reverse order, call the method, wrap the result back into a `VARIANT`, and fill in `puArgErr` if any of it failed. Then repeat that for every member, forever, keeping it in step with the interface.
+
+Every fact needed to do that is already recorded in your **type library**: the member names, their DISPIDs, which are methods and which are properties, the parameter types, and the vtable slot each one occupies. MIDL put it there when it compiled your IDL.
+
+So instead of writing that code, hand the call to the type library and let it do the work. `ITypeInfo::Invoke` looks up the DISPID, coerces the arguments to the declared types, and calls the correct vtable slot on your object. Two calls do the whole job:
+
+| You implement | You call | What it does |
+|---|---|---|
+| `GetIDsOfNames` | `DispGetIDsOfNames` | Looks each name up in the type library and returns its DISPID |
+| `Invoke` | `ITypeInfo::Invoke` | Coerces the arguments and dispatches to the real method |
+
+The rest of the code below is just obtaining the `ITypeInfo` once and caching it:
 
 ```cpp
 class Calculator : public ICalculator
@@ -461,55 +485,137 @@ For late-bound calls, `Invoke`'s `pExcepInfo` carries the same information. If y
 
 ## 5.7 Connection points — COM events
 
-COM's callback/event mechanism, built from two roles:
+Every call so far has gone one direction: the client calls the object. This section is about the other direction.
 
-> - The **source** is the object that raises events — normally the server object you wrote.
-> - The **sink** is the object that *receives* them, and it is implemented by the **client**.
->
-> The names are a plumbing metaphor: events flow out of a source and into a sink.
+### 1. The problem
+
+An object often needs to tell its client something **without being asked**: a long operation finished, a value changed, a document was saved, a device was plugged in.
+
+It cannot simply call the client back, because **it does not know who its clients are.** `CoCreateInstance` hands interface pointers out; it never tells the object who received them.
 
 ```
-                     ordinary call
+   client A ──┐
+   client B ──┼──►  Calculator        "Something just changed.
+   client C ──┘                        Who do I tell?"
+```
+
+**Why not just add a callback method?** You could put `SetCallback(IProgress*)` on your interface and it would work. But it takes one subscriber, for one kind of notification, through a convention *you* invented. No scripting host, form designer or IDE can discover it, because there is nothing standard to look for — the same problem Module 0 says COM exists to remove.
+
+### 2. The idea
+
+The client builds a small COM object of its own and hands it to the server. The server now has something concrete to call.
+
+That is the whole mechanism. Everything else is vocabulary and plumbing.
+
+The running example from here on is a method that takes a while — `SumTo(n)`, which adds up every number from 1 to *n* — and reports how far it has got as it goes.
+
+```
+        the client calls the server - every call in Modules 1-4
    ┌──────────┐  ──────────────────────►  ┌──────────────┐
-   │  CLIENT  │      Add(2, 3, &r)        │    SERVER    │
+   │  CLIENT  │     SumTo(1000000, &t)    │    SERVER    │
    │          │                           │              │
    │  + SINK  │  ◄──────────────────────  │  = SOURCE    │
-   └──────────┘      OnCalculated(5)      └──────────────┘
-                        the event
+   └──────────┘        OnProgress(10)     └──────────────┘
+   └──────────┘        OnProgress(20)     └──────────────┘
+        the server calls the client back - these are the events
 ```
 
-Note what the picture shows: **the same two parties, calls running both ways.** Ordinary calls go left to right; events are calls going right to left. The sink is simply the client's end of the return pipe.
+Note the shape of it: **one call in, many calls back, before the first one has returned.** No return value can do that. That is the first of the two reasons events exist; the second one appears in §5.
 
-A sink is **a full COM object, not a function pointer.** It implements `IUnknown` plus the event interface (`_ICalculatorEvents` below), so the source can call it exactly like any other COM interface — which also means the roles invert for events: the server is the caller and the client is the callee. In VB, C#, and VBA the tooling builds that sink object for you behind `WithEvents` and `+=`; in C++ you write it yourself.
+Both arrows are ordinary COM calls: same vtables, same `HRESULT`s, same apartment rules. **The only thing that makes the lower ones "events" is their direction.** So the roles swap depending on which call you mean:
 
-### The problem being solved
+| Call | Caller | Callee | Whose code runs |
+|---|---|---|---|
+| `SumTo(1000000, &t)` | client | server | the server's `Calculator::SumTo` |
+| `OnProgress(10)` | server | client | the client's sink class |
 
-Every call so far has travelled one way: client → object. A vtable is a list of functions the *client* invokes. But an object often needs to tell its client something **without being asked** — to start a call of its own, in the opposite direction:
+### 3. The three words
 
-- a long operation finished, or wants to report progress;
-- a value the client is displaying has just changed;
-- a document was saved, a cell was edited, a device was plugged in.
-
-The object cannot simply call its client back. **It has no idea who its clients are** — `CoCreateInstance` hands out interface pointers; it does not tell the object who received them.
-
-**Why not just add a callback method?** You could put `SetCallback(IProgress*)` on your interface, and it would work. But it handles exactly one subscriber and one event interface — and it is a private convention that you invented. No scripting host, form designer, or IDE can discover it, because there is nothing standard for them to look for. That is the same class of problem Module 0 says COM exists to remove.
-
-So connection points standardize four things:
-
-| The need | The mechanism |
+| Term | Meaning |
 |---|---|
-| Advertise which event sets I can raise | `IConnectionPointContainer`, plus `[source]` in the type library |
-| Subscribe and unsubscribe | `IConnectionPoint::Advise` / `Unadvise` |
-| Support **many** independent subscribers | the connection point holds a *list* of sinks, not one pointer |
-| Let tools wire events up for you | the typelib describes the event interface, so VB's `WithEvents`, C#'s `+=`, and VBA's `Private Sub obj_Event()` can all be generated automatically |
+| **Outgoing interface** | An interface the object **calls** instead of implementing. An event set is an outgoing interface. |
+| **Source** | The object that raises the events — the server you wrote. |
+| **Sink** | The object that receives them — **written by the client**. |
 
-That last row is the payoff. It is why an event handler in VBA or C# takes one line and no plumbing.
+A sink is **a full COM object, not a function pointer.** It implements `IUnknown` plus the outgoing interface, so the source can call it exactly like any other COM interface. In VB, C# and VBA the tooling writes the sink class for you behind `WithEvents` and `+=`; in C++ you write it yourself.
 
-And because a callback is simply a COM call travelling the other way, it marshals across apartments and processes like any other call (Modules 3 and 4) — the sink does not have to live in the source's process.
+### 4. What COM standardizes
 
-The price is a **reference cycle by construction**, which is where this section's classic leak comes from.
+A "connectable object" is one that supports four things — and these four are precisely what the documentation lists:
 
-### The shape
+| The need | The API |
+|---|---|
+| Say which outgoing interfaces I support | `IConnectionPointContainer::EnumConnectionPoints` — one connection point per outgoing IID |
+| Find the connection point for one event set | `IConnectionPointContainer::FindConnectionPoint(IID)` |
+| Connect and disconnect sinks | `IConnectionPoint::Advise` / `Unadvise` |
+| List the connections that exist | `IConnectionPoint::EnumConnections` — a connection point holds a **list** of sinks, not one pointer |
+
+Because the type library also describes the outgoing interface, tools can generate the wiring: VB's `WithEvents`, C#'s `+=`, VBA's `Private Sub obj_Event()`. That is the payoff — an event handler costs one line and no plumbing.
+
+### 5. When the event fires
+
+Two questions get confused here, and they have different answers.
+
+**Is the call synchronous?** Always. Raising an event means calling a method on the sink, and that is an ordinary COM call: the source blocks until your handler returns an `HRESULT`. Connection points offer no post-and-forget path.
+
+**When does the source raise it?** That is the **server author's choice** — nothing in the standard fixes it. Most sources raise an event at the moment the thing happens, which puts it inside the method that caused it. That is what this section's implementation does, calling `Fire_OnProgress` from inside the loop:
+
+```
+   CLIENT  (implements the sink)      ║      SERVER  (is the source)
+   ═══════════════════════════════════╬═══════════════════════════════════
+                                      ║
+   1. SumTo(1000000, &t) ─────────────╫───► SumTo begins looping
+                                      ║        │
+   3. OnProgress(10) runs here ◄──────╫────────┤  2. Fire_OnProgress(10)
+      └── returns S_OK ───────────────╫───────►│     ...loop continues
+                                      ║        │
+   5. OnProgress(20) runs here ◄──────╫────────┤  4. Fire_OnProgress(20)
+      └── returns S_OK ───────────────╫───────►│     ...and so on
+                                      ║        │
+   7. SumTo returns, t is set ◄───────╫────────┘  6. *total = sum; return S_OK
+                                      ║
+```
+
+Follow the numbers: everything from step 2 onwards happens **inside** step 1. `SumTo` has not returned when your handler runs, and it is all one thread.
+
+#### The other reason events exist: one caller, many observers
+
+Section 2 gave the first reason — a progress report cannot be a return value, because there are many of them and the call has not finished. Here is the second: a connection point keeps a **set of connections**, so firing an event reaches every sink attached to it, not just whoever made the call.
+
+```
+   client A ── SumTo(...) ──►  Calculator  ── OnProgress ──► client A   (it asked)
+                              (ONE instance)  │
+                                    ├──────── OnProgress ──► client B   (it did not,
+                                    │                                    and could not
+                                    └──────── OnProgress ──► client C    otherwise know)
+```
+
+A progress bar in one window, a log file, and an audit component can all watch the same operation without any of them being the caller. B and C never invoked anything, so no return value is coming their way — polling would be the only alternative.
+
+Two conditions on that picture, and both matter in practice:
+
+- **It is one object, not one class.** A connection point belongs to a specific *instance*. B and C must be holding the **same** `Calculator` object — obtained from the Running Object Table, or handed to them by A. If each of them called `CoCreateInstance` they would each own a separate object with its own sink list, and no event would ever cross between them. This is exactly why Office automation examples fetch the *running* Excel rather than creating a new one.
+- **The number of sinks may be capped.** Nothing obliges a component to accept many subscribers; some accept only one, and the second attempt to subscribe simply fails. The subscription call and its error codes come later in this section.
+
+The same shape covers events that follow no call at all: `OnDeviceArrived`, `OnDocumentSaved` when the *user* pressed Ctrl+S, `OnCellChanged` when another client wrote to the sheet. Nobody invoked a method, so there is no return value to attach the news to.
+
+Three consequences, each of which shows up in real tickets:
+
+- **Your handler blocks the server.** `SumTo` is waiting for `OnProgress` to return before it resumes the loop. A handler that opens a dialog or waits on a lock stops the calculation dead. This holds no matter when the author chose to fire.
+- **Every subscriber pays, on every event.** The source calls each sink in turn. Ten progress events and three slow handlers means thirty blocking calls inside one method — the classic "adding a listener made the app crawl" ticket.
+- **This is reentrancy** (Module 3 §3.6). Your code runs while `SumTo` is unfinished, so calling back into that same object re-enters a method already in progress.
+
+A server may instead queue the event and raise it later from another thread. That is a legitimate design — but the call then crosses an apartment boundary to reach your sink, and Module 3's rules apply in full. **When diagnosing someone else's component, do not assume either pattern: check which thread the handler runs on.**
+
+### 6. The catch
+
+A connection is a **reference cycle by construction**: the source holds a reference to the sink so it can call it, and the sink usually holds a reference to the source so it can use it. Neither can reach zero on its own.
+
+That is what `Unadvise` is for, and forgetting it is the classic leak at the end of this section.
+
+### 7. Putting the objects on a diagram
+
+The four APIs above become three objects. The container answers "which event sets do you have?", each connection point owns the list of sinks for one event set, and the sink is the client's own object:
 
 ```
    Client                                 Server (source object)
@@ -521,6 +627,8 @@ The price is a **reference cycle by construction**, which is where this section'
         └── Advise() registers it ─────────────────►
 ```
 
+The rest of this section builds exactly that: the IDL that declares the outgoing interface, the server side, the client's sink, and what `Advise` really does.
+
 ### IDL
 
 ```idl
@@ -529,7 +637,7 @@ dispinterface _ICalculatorEvents        // 'dispinterface' = late-bound only
 {
     properties:
     methods:
-        [id(1)] void OnCalculated([in] LONG result);
+        [id(1)] void OnProgress([in] LONG percent);
         [id(2)] void OnError([in] BSTR message);
 };
 
@@ -583,16 +691,41 @@ public:
         CONNECTION_POINT_ENTRY(DIID__ICalculatorEvents)
     END_CONNECTION_POINT_MAP()
 
-    STDMETHOD(Add)(LONG a, LONG b, LONG* r)
+    STDMETHOD(SumTo)(LONG n, LONG* total)
     {
-        *r = a + b;
-        Fire_OnCalculated(*r);      // generated helper: calls every subscribed sink
+        LONG sum = 0;
+        for (LONG i = 1; i <= n; ++i)
+        {
+            sum += i;
+            if (n >= 10 && i % (n / 10) == 0)
+                Fire_OnProgress(i / (n / 100));   // generated helper: calls every sink
+        }
+        *total = sum;
         return S_OK;
     }
 };
 ```
 
+`Fire_OnProgress` is generated by ATL from the connection point map. It walks the sink list and calls each one in turn — which is why the loop pauses at every tenth of the work, for as long as the slowest handler takes.
+
 ### Client: implementing a sink
+
+**Where is `OnProgress`?** You are about to read a sink class that has no method by that name, which looks wrong until you remember how the event set was declared:
+
+```idl
+dispinterface _ICalculatorEvents        // 'dispinterface' = late-bound only
+```
+
+A `dispinterface` has **no vtable**. There is nothing for the source to call directly, so `Fire_OnProgress` does not invoke a method called `OnProgress` — it calls **`IDispatch::Invoke` on the sink, passing DISPID 1**, which is the ID the IDL assigned to `OnProgress`. Firing an event is exactly the late binding from §5.2, running in the opposite direction.
+
+That is why the sink below implements `IDispatch` and switches on the DISPID, rather than overriding named methods:
+
+| In the IDL | On the wire | In the sink |
+|---|---|---|
+| `[id(1)] void OnProgress(LONG)` | `Invoke(1, ..., DISPPARAMS{percent})` | `case 1:` |
+| `[id(2)] void OnError(BSTR)` | `Invoke(2, ..., DISPPARAMS{message})` | `case 2:` |
+
+Had the event set been declared as a **vtable interface** instead of a `dispinterface`, the sink *would* implement `OnProgress` as a real method and the source would call it directly. Dispinterfaces are used for event sets because scripting hosts can only consume that form — it is what lets the same events reach VBScript and PowerShell.
 
 ```cpp
 class CalcSink : public IDispatch
@@ -624,9 +757,9 @@ public:
     {
         switch (dispid)
         {
-        case 1:   // OnCalculated(LONG result)
+        case 1:   // OnProgress(LONG percent)
             if (pDP && pDP->cArgs == 1)
-                wprintf(L"[event] result = %ld\n", pDP->rgvarg[0].lVal);
+                wprintf(L"[event] %ld%% done\n", pDP->rgvarg[0].lVal);
             return S_OK;
         case 2:   // OnError(BSTR message)
             if (pDP && pDP->cArgs == 1)
@@ -651,13 +784,15 @@ Getting there takes four calls, and only the third is `Advise` itself:
 | 3 | `Advise(pSink, &cookie)` | "here is my sink object; subscribe it" |
 | 4 | `Unadvise(cookie)` | later: "cancel that subscription" |
 
-Inside `Advise`, the source does three things:
+Inside `Advise`, the **source** — that is, the server object you called — does three things:
 
 1. calls `QueryInterface` on your sink for the event interface — if the sink does not implement it, `Advise` fails with `CONNECT_E_CANNOTCONNECT`;
 2. **`AddRef`s the sink** and stores the pointer in its subscriber list;
 3. returns a **cookie** — a token identifying *this one* subscription, which is why `Unadvise` takes it and why many sinks can subscribe independently.
 
-Step 2 is the source half of the reference cycle. And from the moment `Advise` returns, the direction reverses: everything the source sends afterwards is a server → client call.
+Note the reversal in step 1: for the whole course so far, *you* have been the one calling `QueryInterface` on someone else's object. Here the server calls it on **yours**, which is the first sign that the roles are about to swap.
+
+Step 2 is the source half of the reference cycle. And from the moment `Advise` returns, the direction reverses for good: everything the source sends afterwards is a server → client call.
 
 Subscribe and — critically — unsubscribe:
 
@@ -690,9 +825,10 @@ pSink->Release();                    // we drop OUR reference          -> count 
                                      // sink dies while we still expect events.
 
 // --- Events now travel server -> client -----------------------------------
-long r = 0;
-spCalc->Add(2, 3, &r);               // inside Add the source calls Fire_OnCalculated,
-                                     // which lands in our CalcSink::Invoke
+long total = 0;
+spCalc->SumTo(1000000, &total);      // inside SumTo the source calls Fire_OnProgress
+                                     // ten times, each landing in CalcSink::Invoke
+                                     // BEFORE SumTo returns
 
 // --- Step 4: unsubscribe --------------------------------------------------
 spCP->Unadvise(cookie);              // the source Releases the sink    -> count 0
@@ -705,6 +841,15 @@ spCP->Unadvise(cookie);              // the source Releases the sink    -> count
 
 ### The classic leak
 
+> **Strong and weak, recalled from Module 1 §1.8.** A **strong** reference is one you `AddRef`'d: it keeps the target alive and you owe it a `Release`. Every interface pointer in this course so far has been strong. A **weak** reference is a pointer you hold *without* `AddRef` — it does not keep anything alive, and it is your problem to be sure the target still exists before you use it.
+>
+> | | Strong | Weak |
+> |---|---|---|
+> | `AddRef`'d? | yes | no |
+> | Keeps the target alive? | **yes** | no |
+> | Can it be used safely at any time? | yes | only while something *else* holds a strong reference |
+> | Participates in a cycle? | **yes** | no — which is exactly why weak references break cycles |
+
 `Advise` makes the source hold a **strong** reference to the sink. The client typically holds a strong reference to the source. That is a **cycle**:
 
 ```
@@ -712,6 +857,8 @@ spCP->Unadvise(cookie);              // the source Releases the sink    -> count
 ```
 
 Forget `Unadvise` and nothing is ever destroyed. This is the single most common COM leak in the wild.
+
+**Why not just make one of them weak?** That is a legitimate cycle-breaker in general — Module 1 lists it alongside `IWeakReference` — but it cannot work here. The source may need to call the sink at any moment, possibly across a process boundary, so it must be certain the sink is still alive: that requires a strong reference. **Connection points therefore break the cycle by hand rather than by weakness**, and `Unadvise` is that break. Nothing else will do it for you.
 
 **Symptoms:** memory grows with every dialog opened / document loaded / connection made; a server process never exits; a DLL never unloads.
 
@@ -795,13 +942,24 @@ ATL's `CComEnumOnSTL` / `IEnumOnSTLImpl` implement `IEnumVARIANT` over an STL co
 ## 5.9 LAB 5.1 — A dual interface driven from four languages
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ (for `#import`); **Windows PowerShell 5.1 *and* PowerShell 7** — run the lab in both, their COM behaviour differs; `cscript.exe` for the VBScript client; the **.NET SDK** for the C# client.
+> - **Tools:** Visual Studio C++ (for `#import`); **either** Windows PowerShell 5.1 **or** PowerShell 7 — late binding behaves the same in both, so one is enough; `cscript.exe` for the VBScript client; the **.NET SDK** for the C# client.
 > - **VBScript:** on Windows 11 24H2 and later VBScript is an **optional feature on demand**, not installed by default. If `cscript test.vbs` fails, add it under *Settings → System → Optional features → VBSCRIPT*. It is deprecated — you learn it to support the customers still running it, not to write new code.
-> - **Elevation:** required, to register the server **and its type library** (`regsvr32` on a server with an embedded TLB, or `RegisterTypeLib`). Late binding by ProgID needs the CLSID; `#import` and early-bound C# need the TLB.
+> - **Elevation:** yes — **run Visual Studio as administrator**. An ATL DLL project has **Register Output** switched on by default, so every successful build runs `regsvr32` on the result, and that writes the CLSID, ProgID and type library to `HKLM\Software\Classes`. Without elevation the build itself succeeds and the registration step fails. (To work without admin, see the per-user option in the Stage 4 README.) Late binding by ProgID needs the CLSID; `#import` and early-bound C# need the TLB.
 > - **Bitness:** register x64 and use the 64-bit hosts — `%SystemRoot%\System32\cscript.exe` is 64-bit, `%SystemRoot%\SysWOW64\cscript.exe` is 32-bit. Picking the wrong one reproduces Lab 2.2's error, which is a useful accident.
-> - **Depends on:** a dual-interface `Calculator` with a registered type library — easiest via the ATL server in Lab 6.1, or the Module 4 IDL plus a hand-written `IDispatch`.
-> - **Starting point:** [`labs/stage-4-atl-server/`](../labs/stage-4-atl-server/) — its README is a five-minute wizard recipe that produces exactly the server this lab needs.
-> - **Time:** ~3 h.
+> - **Depends on:** a dual-interface `Calculator` with a registered type library.
+> - **Starting point — do this first:** work through the whole of [`labs/stage-4-atl-server/README.md`](../labs/stage-4-atl-server/README.md), steps 1 to 6 (**15–20 min**). It produces exactly the server this lab drives, and **none of the clients below will compile or run until it is finished and registered.** Stop when `regsvr32` reports success.
+> - **Time:** ~2 h for the five clients and the comparison, plus the 15–20 min for the starting point. The raw `IDispatch` client alone is about a third of it — which is the point of writing it once.
+
+**Step 0 — build the server.** This lab has nothing of its own to run against: the component comes from [`labs/stage-4-atl-server/README.md`](../labs/stage-4-atl-server/README.md). Work through its steps 1 to 6 now, and come back when `regsvr32` has reported success.
+
+Then confirm the server is really there — this is the same check every client below depends on:
+
+```powershell
+$calc = New-Object -ComObject TrainingCalc.Calculator.1
+$calc.Add(2, 3)          # 5
+```
+
+If that fails with `0x80040154`, the component is not registered; if it succeeds but `$calc.Describe()` cannot be found, the **type library** is not registered. Fix that before writing any client code, or you will be debugging the wrong layer all afternoon.
 
 One component, five callers, no changes to the component. That is the claim Automation makes, and this lab is where you check it.
 
@@ -870,7 +1028,7 @@ HRESULT CallAddLateBound(IDispatch* pDisp, long a, long b, long* pResult)
 ### PowerShell
 
 ```powershell
-$calc = New-Object -ComObject Training.Calculator.1
+$calc = New-Object -ComObject TrainingCalc.Calculator.1
 $calc.Add(2, 3)
 $calc.Precision = 4          # property put
 $calc.Precision              # property get
@@ -884,7 +1042,7 @@ try { $calc.Divide(10, 0) } catch { $_.Exception.Message }   # IErrorInfo surfac
 ### VBScript
 
 ```vbscript
-Set calc = CreateObject("Training.Calculator.1")
+Set calc = CreateObject("TrainingCalc.Calculator.1")
 WScript.Echo calc.Add(2, 3)
 calc.Precision = 4
 WScript.Echo calc                        ' default member
@@ -898,7 +1056,7 @@ If Err.Number <> 0 Then WScript.Echo "Error: " & Err.Description
 
 ```csharp
 // Late bound - no reference needed
-Type t = Type.GetTypeFromProgID("Training.Calculator.1");
+Type t = Type.GetTypeFromProgID("TrainingCalc.Calculator.1");
 dynamic calc = Activator.CreateInstance(t);
 Console.WriteLine(calc.Add(2, 3));
 
@@ -927,7 +1085,7 @@ Then time 100,000 calls each. Early-bound C++ vs VBScript typically differs by *
 ## 5.10 LAB 5.2 — Events and the `Unadvise` leak
 
 > **Requirements**
-> - **Tools:** Visual Studio C++ with **ATL** (connection-point implementation); Windows PowerShell for `Register-ObjectEvent`.
+> - **Tools:** Visual Studio C++ with **ATL** (connection-point implementation); PowerShell for `Register-ObjectEvent`. If you have **both** Windows PowerShell 5.1 and PowerShell 7, run step 5 in each and compare — plain late-bound calls behave identically, but event subscription is where the two hosts are most likely to diverge, and knowing which one a customer is using saves a long detour.
 > - **Elevation:** required, to register the server and TLB.
 > - **Bitness:** x64, matching the PowerShell host you use.
 > - **Depends on:** the Lab 5.1 server, plus the ref-count tracing from Module 1 — without the trace the leak is invisible, which is the lesson.
@@ -938,18 +1096,18 @@ Connection points build a reference cycle **by construction**: the source holds 
 
 Here you wire one up, remove the `Unadvise`, and watch the trace show that *nothing is ever destroyed* — while the program keeps working perfectly. Then you do the same from PowerShell, because scripting hosts have the identical problem under a different name.
 
-1. Add `_ICalculatorEvents` with `OnCalculated`, implement the connection point, and wire up the C++ sink from §5.7. Confirm the callback fires.
+1. Add `_ICalculatorEvents` with `OnProgress`, implement the connection point, add `SumTo`, and wire up the C++ sink from §5.7. Confirm the handler runs **ten times before `SumTo` returns** — print a line before and after the call to prove the ordering.
 2. Add the Module 1 ref-count tracing to both the source and the sink.
 3. **Remove the `Unadvise`.** Run. Observe in the trace: neither the sink nor the source is ever destroyed. Note that nothing *fails* — the program runs correctly and just leaks.
 4. Restore `Unadvise` via the `ConnectionCookie` RAII wrapper.
 5. Subscribe from **PowerShell** and confirm the same mechanism serves scripts:
 
 ```powershell
-$calc = New-Object -ComObject Training.Calculator.1
-Register-ObjectEvent -InputObject $calc -EventName OnCalculated -Action {
-    Write-Host "event: $($EventArgs)"
+$calc = New-Object -ComObject TrainingCalc.Calculator.1
+Register-ObjectEvent -InputObject $calc -EventName OnProgress -Action {
+    Write-Host "progress: $($EventArgs)%"
 }
-$calc.Add(2, 3)
+$calc.SumTo(1000000)
 Get-EventSubscriber | Unregister-Event      # the PowerShell equivalent of Unadvise
 ```
 
