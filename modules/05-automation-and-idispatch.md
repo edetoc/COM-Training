@@ -1737,4 +1737,4 @@ Recognize it fast: check whether the process is a service, then look for `Intera
 
 ---
 
-**Next: [Module 6 — Frameworks: ATL, WRL, WIL, and .NET interop](06-frameworks-and-interop.md)**
+**Next: [Module 6 — Choosing COM tools and interop](06-frameworks-and-interop.md)**

@@ -14,7 +14,7 @@
 | 3 | [Threading and apartments](modules/03-apartments-and-threading.md) | STA/MTA/NA, `ThreadingModel`, marshaling, reentrancy, deadlocks |
 | 4 | [Interfaces, IDL, MIDL, and marshaling](modules/04-idl-and-marshaling.md) | IDL attributes, memory ownership, proxy/stub vs typelib, versioning |
 | 5 | [Automation, `IDispatch`, and scripting](modules/05-automation-and-idispatch.md) | Dual interfaces, `VARIANT`/`BSTR`/`SAFEARRAY`, events, enumerators, `IErrorInfo` |
-| 6 | [Frameworks: ATL, WRL, WIL, .NET interop](modules/06-frameworks-and-interop.md) | What the macros generate, RCW/CCW, `ComWrappers` |
+| 6 | [Choosing COM tools: ATL, WRL, WIL, C++/WinRT, .NET](modules/06-frameworks-and-interop.md) | What each tool provides, how they differ, choosing by task, managed interop |
 | 7 | [DCOM, security, and out-of-proc](modules/07-dcom-and-security.md) | AppID, session 0, `CoInitializeSecurity`, UAC, Event 10016, hardening |
 | 8 | [Debugging, diagnostics, and capstone](modules/08-debugging-and-capstone.md) | ProcMon, WinDbg, ETW, AppVerifier, triage flowchart, capstone project |
 
@@ -440,7 +440,7 @@ That runbook is the deliverable that proves you've made it.
 | 3 | [Threading & apartments](modules/03-apartments-and-threading.md) | ☐ | ☐ | ☐ | ☐ |
 | 4 | [IDL & marshaling](modules/04-idl-and-marshaling.md) | ☐ | ☐ | ☐ | ☐ |
 | 5 | [Automation & IDispatch](modules/05-automation-and-idispatch.md) | ☐ | ☐ | ☐ | ☐ |
-| 6 | [ATL / WRL / .NET interop](modules/06-frameworks-and-interop.md) | ☐ | ☐ | ☐ | ☐ |
+| 6 | [Choosing COM tools and interop](modules/06-frameworks-and-interop.md) | ☐ | ☐ | ☐ | ☐ |
 | 7 | [DCOM & security](modules/07-dcom-and-security.md) | ☐ | ☐ | ☐ | ☐ |
 | 8 | [Debugging & capstone](modules/08-debugging-and-capstone.md) | ☐ | ☐ | ☐ | ☐ |
 | A | [Monikers & persistence](modules/appendix-a-monikers-and-persistence.md) | ☐ | — | ☐ | ☐ |
