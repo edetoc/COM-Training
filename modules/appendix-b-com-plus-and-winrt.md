@@ -59,7 +59,7 @@ You mark a component "requires a transaction," and COM+ interposes itself betwee
 | **Server application** | Its own `dllhost.exe` | Isolation, separate identity, remote access, full COM+ services |
 | **Library application** | The **caller's** process | Speed; loses process isolation and its own identity |
 
-A server application is essentially a managed `DllSurrogate` (Module 7 §7.10) with services layered on. Everything you know about AppID identity and permissions applies.
+A server application is essentially a managed `DllSurrogate` ([Lab 7.1 Part B](07-dcom-and-security.md#part-b-compare-with-a-dll-surrogate)) with services layered on. Everything you know about AppID identity and permissions applies.
 
 **Context** is the mechanism. When a COM+ component is activated, the runtime places it in a **context** carrying its declared attributes. Calls crossing a context boundary are **intercepted** — and that interception is where transactions, security checks, and JIT activation happen.
 

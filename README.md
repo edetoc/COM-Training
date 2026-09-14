@@ -372,13 +372,11 @@ Implement a connection point, subscribe a sink, and confirm callbacks. Then remo
 - Remote DCOM: endpoint mapper (TCP 135), dynamic RPC port range, firewall rules, `DCOM hardening` (CVE-2021-26414 / `RequireIntegrityActivationAuthenticationLevel`) — a very common modern support topic.
 - Windows Firewall + `dcomcnfg` + `netsh` diagnostics.
 
-**Lab 7.1** — Convert your in-proc server to an out-of-proc EXE server with `CoRegisterClassObject`. Watch the SCM start it. Kill the server mid-call from the client and observe `RPC_E_DISCONNECTED` / `0x800706BA`.
+**Lab 7.1 — Out-of-process hosting.** Run the supplied EXE server with `CoRegisterClassObject` and examine activation, marshaling, and lifetime. Then make a short comparison with a DLL hosted in `dllhost.exe`, including a 64-bit client calling a 32-bit DLL. Restore the EXE setup afterwards.
 
-**Lab 7.2** — Configure a `DllSurrogate` for the in-proc server. Confirm it now runs in `dllhost.exe` (Process Explorer).
+**Lab 7.2 — Permissions and Event 10016.** Use the EXE server's AppID to investigate launch versus access permissions and server identity. Reproduce a permission failure, read the corresponding event, and grant only the required right to the intended account.
 
-**Lab 7.3** — Set a restrictive Launch permission via `dcomcnfg`, reproduce `E_ACCESSDENIED` + Event 10016, then fix it properly (grant to the right principal, not "Everyone").
-
-**Lab 7.4** — Remote activation between two machines/VMs with `CoCreateInstanceEx` + `COSERVERINFO`. Break it with a firewall rule, diagnose with the error code alone, then fix.
+**Lab 7.3 — Remote DCOM.** Activate the EXE server between two machines/VMs with `CoCreateInstanceEx` + `COSERVERINFO`. Change one network or permission setting at a time, correlate errors with logs, and restore the working configuration.
 
 ---
 

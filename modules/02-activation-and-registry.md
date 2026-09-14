@@ -967,7 +967,7 @@ This experiment is worth an hour; it explains a whole family of tickets.
 > - **Bitness:** you need **all four** binaries — x86 and x64 of both DLL and client.
 > - **Depends on:** Lab 2.1.
 > - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) — open `Stage2.sln` and build **both** platforms: once with the dropdown on **x64**, once on **x86**.
-> - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in Lab 7.2.
+> - **Expected to fail:** step 6 (DLL surrogate) *cannot* succeed yet — the interface has no marshaling support. Record the failure and finish it in [Lab 7.1 Part B](07-dcom-and-security.md#part-b-compare-with-a-dll-surrogate).
 > - **Time:** ~60 min.
 
 A bitness mismatch is the most common activation failure there is, and it reports the *same* `0x80040154` as "never registered at all". Telling those two apart from the error code alone is impossible — you have to look at where the registration landed.
@@ -1018,7 +1018,7 @@ An AppID is just a GUID naming a *process configuration* (§2.2), so any unique 
 
 8. Rebuild the **x64** client and run it. Now that the surrogate hosts the 32-bit DLL, a 64-bit client can reach it. While it runs, find **`dllhost.exe`** in Process Explorer and confirm `Calc.dll` is loaded inside it (Ctrl+D shows the DLL list) — the object is genuinely in another process.
 
-> **Caveat:** surrogate activation requires the interface to be marshalable — a registered proxy/stub or a type library. Your `ICalculator` has neither yet, so this lab will fail with `E_NOINTERFACE` at the `QueryInterface` step. **That is the intended lesson.** Come back and finish this lab at the end of Module 4. Write the failure down now.
+> **Caveat:** surrogate activation requires the interface to be marshalable — a registered proxy/stub or a type library. Your `ICalculator` has neither yet, so this lab will fail with `E_NOINTERFACE` at the `QueryInterface` step. **That is the intended lesson.** Write the failure down now; [Lab 7.1 Part B](07-dcom-and-security.md#part-b-compare-with-a-dll-surrogate) revisits it after Module 4 has supplied the marshaling support.
 
 ---
 

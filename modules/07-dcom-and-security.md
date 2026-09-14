@@ -1,12 +1,18 @@
 # Module 7 — DCOM, security, and out-of-proc servers
 
-Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here. **This module is the core of the support-engineer track.**
+Once a COM object lives in another process — or on another machine — activation stops being a registry lookup and becomes a *security decision*. Nearly every "access denied," "server execution failed," and Event 10016 ticket lives here.
+
+**What is Event 10016?** It is a Windows event-log entry from the **DistributedCOM** source, visible in **Event Viewer > Windows Logs > System**. The number `10016` identifies the event type; it is not an `HRESULT`. The message reports that a caller lacked permission to launch or activate a COM component and identifies the caller, component, and permission involved.
+
+**It does not necessarily mean an application is broken.** Some Windows components encounter this denial and then succeed through another supported path. Correlate the event with an actual application failure before considering permission changes. [Section 7.7](#77-event-10016--reading-it-correctly) explains how to read the message and decide whether to investigate.
 
 **What this module covers**
 
-What changes once an object lives in another process: the AppID and the process-wide settings that hang off it, session 0 isolation, and the authentication and impersonation levels set by `CoInitializeSecurity`. Then the security decisions themselves — UAC and integrity levels, Launch versus Access permissions and how to tell them apart from the symptom alone, and Event 10016 read correctly, including when *not* to act on it. It finishes with remote DCOM: the ports, the endpoint mapper, and the failures that only appear across a network.
+What changes once an object lives in another process: the AppID and the process-wide settings configured under its registry key, session 0 isolation, and the authentication and impersonation levels set by `CoInitializeSecurity`. Then the security decisions themselves — UAC and integrity levels, Launch versus Access permissions and how to tell them apart from the symptom alone, and Event 10016 read correctly, including when *not* to act on it. It finishes with remote DCOM: the ports, the endpoint mapper, and the failures that only appear across a network.
 
-> **DCOM** stands for **Distributed COM**. It is not a separate technology you opt into — it is the same COM from Modules 1–6, with the proxy/stub plumbing of Modules 3 and 4 carried over a **network transport** (Microsoft RPC) instead of staying inside one process. Your client code does not change at all: still `CoCreateInstance`, still `QueryInterface`, still the same interfaces. That is Module 0's third pillar, location transparency, cashed in.
+> **DCOM** stands for **Distributed COM**. It is not a separate technology you opt into — it is the same COM from Modules 1–6, with the proxy/stub plumbing of Modules 3 and 4 carried over a **network transport** (Microsoft RPC) instead of staying inside one process. Your client code does not change at all: still `CoCreateInstance`, still `QueryInterface`, still the same interfaces. This illustrates **location transparency**, introduced in Module 0: once the client has an interface pointer, it calls the same methods whether the object runs in the same process, another local process, or on another machine.
+>
+> **RPC (Remote Procedure Call)** lets a program call a function in another process, on the same computer or across a network.
 >
 > What DCOM adds is everything a boundary forces you to answer:
 >
@@ -29,33 +35,66 @@ What changes once an object lives in another process: the AppID and the process-
 - [7.6 DCOM permissions in practice](#76-dcom-permissions-in-practice)
 - [7.7 Event 10016 — reading it correctly](#77-event-10016--reading-it-correctly)
 - [7.8 Remote DCOM](#78-remote-dcom)
-- [7.9 LAB 7.1 — Build an out-of-proc EXE server](#79-lab-71--build-an-out-of-proc-exe-server)
-- [7.10 LAB 7.2 — DLL surrogate](#710-lab-72--dll-surrogate)
-- [7.11 LAB 7.3 — Permissions and Event 10016](#711-lab-73--permissions-and-event-10016)
-- [7.12 LAB 7.4 — Remote DCOM](#712-lab-74--remote-dcom)
-- [7.13 Security checklist for reviewing a COM server](#713-security-checklist-for-reviewing-a-com-server)
-- [7.14 The DCOM support triage flow](#714-the-dcom-support-triage-flow)
-- [7.15 Checkpoint](#715-checkpoint)
-- [7.16 Rules to carry forward](#716-rules-to-carry-forward)
+- [7.9 LAB 7.1 — Out-of-process hosting](#79-lab-71--out-of-process-hosting)
+- [7.10 LAB 7.2 — Permissions and Event 10016](#710-lab-72--permissions-and-event-10016)
+- [7.11 LAB 7.3 — Remote DCOM](#711-lab-73--remote-dcom)
+- [7.12 Security checklist for reviewing a COM server](#712-security-checklist-for-reviewing-a-com-server)
+- [7.13 The DCOM support triage flow](#713-the-dcom-support-triage-flow)
+- [7.14 Checkpoint](#714-checkpoint)
+- [7.15 Rules to carry forward](#715-rules-to-carry-forward)
 
 ---
 
 ## 7.1 The out-of-proc picture
 
+**Out-of-proc** is short for **out-of-process**: the COM object runs in a separate process from the client application, for example in `CalcSrv.exe` or `dllhost.exe`. An **in-proc** object instead runs inside the client's own process, typically in a DLL loaded by the client.
+
 ```
-   Client process                    SCM (RpcSs / DcomLaunch)          Server process
- ┌──────────────────┐              ┌──────────────────────┐         ┌──────────────────┐
- │ CoCreateInstance │─────────────►│ 1. read HKCR\CLSID   │         │                  │
- │                  │              │ 2. read HKCR\AppID   │         │                  │
- │                  │              │ 3. check LaunchPerm  │         │                  │
- │                  │              │ 4. CreateProcessAsUser──────►  │  CoInitializeEx  │
- │                  │              │ 5. wait for class reg│         │  CoRegisterClass │
- │                  │              │◄────────────────────────────── │  Object()        │
- │      proxy       │◄─── OXID/IPID ──── returns marshaled ref ──── │  message loop    │
- │        │         │              └──────────────────────┘         │        ▲         │
- │        └──────── ALPC / RPC (local) or TCP 135 + dynamic (remote) ────────┘         │
- └──────────────────┘                                                └──────────────────┘
+     Client process                    SCM (RpcSs / DcomLaunch)           Server process
+ ┌──────────────────┐              ┌───────────────────────────┐     ┌───────────────────────────┐
+ │ CoInitializeEx   │              │                           │     │                           │
+ │ CoCreateInstance │─────────────►│ 1. read HKCR\CLSID        │     │                           │
+ │                  │              │ 2. read HKCR\AppID        │     │                           │
+ │                  │              │ 3. check LaunchPerm       │     │                           │
+ │                  │              │ 4. CreateProcessAsUser    │────►│  CoInitializeEx           │
+ │                  │              │ 5. wait for class reg     │     │  CoRegisterClassObject()  │
+ │                  │              │                           │◄────│                           │
+ │                  │              └───────────────────────────┘     │                           │
+ │      proxy       │◄── OXID/IPID: marshaled interface reference ───│  message loop             │
+ │        │         │                                                │                           │
+ │        └────────── RPC (local) / RPC over TCP (remote) ──────────►│  stub -> object           │
+ └──────────────────┘                                                └───────────────────────────┘
 ```
+
+**Where the stub fits:** the **proxy** in the client process packages the method arguments for transmission. The **stub** in the server process unpacks them and calls the real object's method. Results travel back through the stub and proxy. The SCM helps with activation; it is not in the path of each method call.
+
+**Why both sides call `CoInitializeEx`:** it initializes COM for the **calling thread**, not for the whole application. The client's thread calls it before `CoCreateInstance`. When COM starts the server EXE, the server's own startup code calls it on its thread before `CoRegisterClassObject`. The client's initialization does not initialize the server. The SCM starts the process; it is the server's code that calls `CoInitializeEx`.
+
+**What `CoRegisterClassObject` does**
+
+The EXE server calls it to tell COM: **"This running process can supply objects for this CLSID; here is the factory to use."** A **class factory** is a COM object implementing `IClassFactory`; its `CreateInstance` method creates or supplies an instance of a class, such as your calculator. Here, the "class object" being registered is that factory, **not a calculator instance**.
+
+This fills in the gap between starting the server and returning a proxy in the diagram:
+
+1. The server initializes COM and constructs its class factory.
+2. It calls `CoRegisterClassObject`, passing the **CLSID**, a pointer to the **factory**, and `CLSCTX_LOCAL_SERVER` to register it for out-of-process activation.
+3. Once the registration is available to clients, COM can connect the client's activation request to the factory. The client's `CoCreateInstance` uses `IClassFactory::CreateInstance` to request the calculator interface.
+4. The interface is marshaled back to the client, which receives a **proxy** for calling the calculator in the server process.
+
+If the server registers with `REGCLS_SUSPENDED`, it must also call `CoResumeClassObjects` to make the suspended registrations available. This lets it finish initialization before accepting activation requests.
+
+**Do not confuse the two kinds of registration:**
+
+| Registration | What it tells COM | When it happens |
+|---|---|---|
+| Registry entries such as `LocalServer32` | Where to find the EXE to start | Installation, or the server's `-RegServer` command |
+| `CoRegisterClassObject` | Which live factory can supply objects for a CLSID | Each time the EXE server starts and prepares to serve clients |
+
+`CoRegisterClassObject` does **not** write those registry entries, and it does **not** create the calculator itself. For comparison, an in-process DLL exposes its factory through `DllGetClassObject`; an EXE server makes its factory available through this runtime registration.
+
+On success, the function writes a **registration cookie** (a `DWORD` identifier) to its final output parameter. The server saves it and later passes it to `CoRevokeClassObject` to withdraw the factory registration. Revoking it does not delete the installed registry entries or destroy calculator objects already created.
+
+**Support clue:** seeing the EXE running is not enough. If it never makes the expected factory registration available, activation can time out with `CO_E_SERVER_EXEC_FAILURE` (`0x80080005`). That is why step 5 in the diagram waits for class registration.
 
 > **"SCM" here is COM's Service Control Manager** — the broker that maps a CLSID to a server, runs the security checks, starts the process, and hands the client back a marshaled reference.
 >
@@ -77,7 +116,7 @@ Two distinct security checks happen:
 1. **Launch/Activation permission** — step 3 in the diagram. *May this client **start** this server, or activate an object inside it?* The SCM checks the caller's token against the **`LaunchPermission`** security descriptor stored on the AppID key (§7.2), and it does so **before** `CreateProcess` — so a failure here means the server process never even starts. If the AppID carries no `LaunchPermission` value, the machine-wide default under `HKLM\SOFTWARE\Microsoft\Ole` applies instead.
 2. **Access permission** — may this client *call* into the running server? Checked per-call by the RPC layer, against `AccessPermission`.
 
-> **`LaunchPermission` is not one right, it is four:** *Local Launch*, *Remote Launch*, *Local Activation*, and *Remote Activation*. They are granted and denied independently, which is why "it works on the box but not from another machine" is a permissions answer at least as often as it is a firewall one. `dcomcnfg` shows all four as separate checkboxes (§7.6).
+> **The `LaunchPermission` setting covers four separate permissions:** *Local Launch*, *Remote Launch*, *Local Activation*, and *Remote Activation*. They are granted and denied independently, which is why "it works on the box but not from another machine" is a permissions answer at least as often as it is a firewall one. `dcomcnfg` shows all four as separate checkboxes (§7.6).
 
 They are configured separately and fail differently. Confusing them is the most common diagnostic error.
 
@@ -142,7 +181,7 @@ Consequences you must know cold:
 
 ## 7.4 `CoInitializeSecurity`
 
-Sets the process-wide security policy for COM: how callers are authenticated, whether this process may impersonate them, and who is allowed to call in at all.
+Sets the process-wide security policy for COM: access permissions and authentication requirements for incoming calls, plus authentication and impersonation defaults for outgoing calls. It establishes policy at startup; it does not itself impersonate anyone.
 
 ### How it differs from `CoInitializeEx`
 
@@ -151,7 +190,7 @@ Two unrelated jobs that happen to sit next to each other in startup code:
 | | `CoInitializeEx` | `CoInitializeSecurity` |
 |---|---|---|
 | Scope | per **thread** | per **process** |
-| Decides | which apartment this thread joins (§3.4) | authentication, impersonation and access policy for *every* COM call in the process |
+| Decides | which apartment this thread joins (§3.4) | incoming-call security and default settings for outgoing calls |
 | Who calls it | **every** thread that touches COM | **one** thread, once |
 | Mandatory? | yes — or you get `CO_E_NOTINITIALIZED` | no — COM will pick defaults for you |
 
@@ -171,20 +210,50 @@ CoInitializeSecurity(...);                       // 2. once per process: set the
 // ... only now do any COM work
 ```
 
-**If you never call it,** COM calls it for you at the first activation or marshal, using the AppID's `AuthenticationLevel` and permissions, falling back to the machine defaults under `HKLM\SOFTWARE\Microsoft\Ole`. That is perfectly acceptable for many clients — but it is **one-shot**. Once the policy is set, explicitly or implicitly, it cannot be changed: a later call returns **`RPC_E_TOO_LATE` (`0x80010119`)**. In practice that error means *something did COM work before you got here* — a static initializer, a helper library, or a logging call.
+**If you never call it,** COM initializes security automatically when an interface is first marshaled or unmarshaled, using the applicable AppID settings and registry defaults under `HKLM\SOFTWARE\Microsoft\Ole`. That is perfectly acceptable for many clients, but it is **one-shot**. Once initialized, explicitly or implicitly, the process defaults cannot be reinitialized: a later call returns **`RPC_E_TOO_LATE` (`0x80010119`)**. A library may already have initialized security or caused COM to initialize it implicitly before your code gets here.
+
+### Does this override the AppID settings?
+
+**Yes, for the process's COM call-security policy, but not for every AppID setting.** When an early, successful `CoInitializeSecurity` call supplies the security values directly, those values take precedence over the corresponding registry settings. The call affects **its own process**; it neither edits the registry nor changes another process's policy.
+
+| Setting | Can `CoInitializeSecurity` replace it? |
+|---|---|
+| AppID `AccessPermission` | **Yes.** The server can supply its own access policy for incoming calls instead. |
+| AppID `AuthenticationLevel` | **Yes.** The process can specify its authentication default in code, subject to Windows' minimum requirements. |
+| AppID `LaunchPermission` | **No.** COM still checks launch/activation permissions independently of the server's call-security policy. |
+| AppID `RunAs`, `LocalService`, or `DllSurrogate` | **No.** This function does not choose the server's account or how it is hosted. |
+| `MachineAccessRestriction` and `MachineLaunchRestriction` | **No.** Machine-wide restrictions remain an upper limit on what the application can allow. |
+
+For example, a server can use code to decide who may call its objects, but that does not grant a denied client **Remote Activation** permission. Likewise, a client's call to `CoInitializeSecurity` does not override the server's access policy.
+
+**You can also explicitly choose the AppID policy:** set `EOAC_APPID` and pass a pointer to the AppID GUID as the first argument. In that mode, COM reads the registry policy and ignores the other arguments apart from those selecting the AppID mode; it does not combine registry settings with authentication levels supplied in the call.
+
+### Example: client authentication defaults
+
+This is a **startup excerpt for a native client EXE** that makes outgoing COM calls and does not expose objects or receive callbacks. Place it after successful `CoInitializeEx` and before activation or marshaling. It configures this client's defaults, not the server's policy.
 
 ```cpp
 HRESULT hr = CoInitializeSecurity(
-    nullptr,                            // security descriptor (NULL = use AppID/defaults)
-    -1,                                 // count of auth services (-1 = choose)
-    nullptr,                            // auth services array
-    nullptr,                            // reserved
-    RPC_C_AUTHN_LEVEL_PKT_INTEGRITY,    // default authentication level
-    RPC_C_IMP_LEVEL_IDENTIFY,           // default impersonation level
-    nullptr,                            // auth info
-    EOAC_NONE,                          // capabilities
-    nullptr);                           // reserved
+    nullptr,
+    -1,
+    nullptr,
+    nullptr,
+    RPC_C_AUTHN_LEVEL_PKT_INTEGRITY,
+    RPC_C_IMP_LEVEL_IDENTIFY,
+    nullptr,
+    EOAC_NONE,
+    nullptr);
 ```
+
+Check `hr` and stop initialization on failure rather than continuing to activate objects with an unintended security policy.
+
+- **`RPC_C_AUTHN_LEVEL_PKT_INTEGRITY`** requests authenticated calls with tamper detection. It does not encrypt the call data.
+- **`RPC_C_IMP_LEVEL_IDENTIFY`** lets the receiving server identify this client and check its permissions, but not open files or other resources as this client. It does not grant the client permission to impersonate the server.
+- These are **process defaults**. A client can configure a particular proxy with `CoSetProxyBlanket`, which sets that proxy's call-security settings without reinitializing the process. The receiving server's requirements and Windows restrictions still apply.
+
+**This is not a server access-policy example.** With `EOAC_NONE`, the first `nullptr` supplies no application-level access restriction; it does **not** mean "use AppID/defaults." Authentication requirements and machine-wide restrictions still apply. A process accepting calls, including callbacks, must also choose an appropriate incoming-call access policy. The server example below shows how to select that policy from the AppID.
+
+See the [CoInitializeSecurity API reference](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-coinitializesecurity) for the `EOAC_APPID` and null-descriptor rules.
 
 ### Authentication levels
 
@@ -198,6 +267,8 @@ HRESULT hr = CoInitializeSecurity(
 | `RPC_C_AUTHN_LEVEL_PKT_PRIVACY` | 6 | + encryption |
 
 ### Impersonation levels
+
+The impersonation argument to `CoInitializeSecurity` sets what other servers may do on behalf of **this process when it makes outgoing calls**. A server cannot increase the authority granted by an incoming caller merely by setting a higher level in its own initialization.
 
 | Level | Server may… |
 |---|---|
@@ -219,42 +290,28 @@ Rule: **give the minimum that works.** `IDENTIFY` is enough for "check whether t
 
 Hardened services set `EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA | EOAC_SECURE_REFS` with `PKT_INTEGRITY` or higher.
 
-### Server side: identifying and impersonating the caller
+### Example: server initialization using the AppID
+
+An EXE server also initializes security **once at startup**, after `CoInitializeEx` and before making its class factories available. It can supply its own access policy in code or explicitly select the administrator-configured AppID policy. This excerpt demonstrates the second choice:
 
 ```cpp
-STDMETHODIMP CMyObject::DoPrivilegedThing()
-{
-    HRESULT hr = CoImpersonateClient();          // now running as the caller
-    if (FAILED(hr)) return hr;
-
-    // ... open the resource AS THE CALLER, so ACLs are enforced naturally ...
-    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                           OPEN_EXISTING, 0, nullptr);
-
-    CoRevertToSelf();                            // ALWAYS revert - use RAII
-    if (h == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
-    CloseHandle(h);
-    return S_OK;
-}
+HRESULT hr = CoInitializeSecurity(
+    nullptr,
+    -1,
+    nullptr,
+    nullptr,
+    RPC_C_AUTHN_LEVEL_DEFAULT,
+    RPC_C_IMP_LEVEL_IDENTIFY,
+    nullptr,
+    EOAC_APPID,
+    nullptr);
 ```
 
-Failing to `CoRevertToSelf` leaves the thread impersonating — a serious security bug, because the thread returns to a pool and subsequent work runs under the wrong identity. Wrap it:
+With **`EOAC_APPID`**, the first `nullptr` tells COM to find the AppID through the executable-name mapping, for example the named `AppID` value under `HKCR\AppID\CalcSrv.exe`. That mapping must already exist; this call does not create it. Alternatively, pass a pointer to the AppID GUID as the first argument.
 
-```cpp
-auto revert = wil::scope_exit([]{ CoRevertToSelf(); });
-```
+In this mode the remaining security arguments are ignored, including the authentication and impersonation values shown above. COM reads the applicable registry policy instead. Check `hr` and do not publish the factories if security initialization fails. The server cannot use this call to bypass launch permissions or machine-wide restrictions.
 
-To inspect without impersonating, use `CoQueryClientBlanket`:
-
-```cpp
-DWORD authnSvc, authzSvc, authnLevel, impLevel;
-OLECHAR* pServerPrincName = nullptr;
-RPC_AUTHZ_HANDLE hPriv = nullptr;
-HRESULT hr = CoQueryClientBlanket(&authnSvc, &authzSvc, &pServerPrincName,
-                                  &authnLevel, &impLevel, &hPriv, nullptr);
-// hPriv points at the client's principal name for NTLM/Kerberos
-CoTaskMemFree(pServerPrincName);
-```
+**Initialization is separate from handling an individual call.** Later, inside a server method, `CoQueryClientBlanket` can inspect the current call's security information. `CoImpersonateClient` lets the executing thread use the caller's identity to the extent that caller allowed; opening a file as the caller requires at least `IMPERSONATE`, not the client example's `IDENTIFY`. Every successful impersonation must be paired with `CoRevertToSelf`, including on error paths. These are **per-call operations**, not replacements for `CoInitializeSecurity`, and initializing security does not automatically perform them.
 
 ---
 
@@ -344,6 +401,8 @@ So granting a user permission on the AppID has **no effect** if the machine-wide
 
 ### `dcomcnfg` walkthrough
 
+**`dcomcnfg`** is a Windows command that opens the **Component Services** administration console. It provides a graphical interface for configuring COM/DCOM settings, including launch and access permissions and the account a server runs under.
+
 `dcomcnfg` → Component Services → Computers → My Computer:
 
 - **Right-click → Properties → Default Properties**: `EnableDCOM`, default authentication/impersonation levels.
@@ -411,7 +470,7 @@ administrative tool.
 |---|---|
 | `Local Activation` vs `Local Launch` vs `Remote …` | **Which right** is missing |
 | CLSID | The class — look it up to identify the component |
-| APPID | Where to fix it |
+| APPID | The application's configuration to inspect |
 | user | **Who** was denied |
 | address / LRPC vs TCP | Local or remote |
 | application container | Whether an AppContainer/packaged app was involved |
@@ -433,13 +492,33 @@ Loosening permissions on a system AppID — which requires taking ownership of t
    (Get-ItemProperty "HKLM:\SOFTWARE\Classes\CLSID\$clsid\InprocServer32" -EA SilentlyContinue).'(default)'
    ```
 3. If it's a **Microsoft OS component** → check Microsoft's documented list of ignorable 10016s. Default answer: leave it alone.
-4. If it's a **third-party or in-house component** → grant the *specific* right to the *specific* principal on the *specific* AppID. Never "Everyone / Full Control."
+4. If it's a **third-party or in-house component** and the intended caller should have the missing permission → follow the component's documented requirements and grant only the required right. Never "Everyone / Full Control."
 
-Write this decision tree into your notes. Being the engineer who correctly says "that event is benign, the real problem is elsewhere" is genuinely valuable.
+### How to fix a confirmed permission failure
+
+For the event above, the fix logic would be:
+
+```text
+If the event is harmless:
+    Leave the permissions unchanged.
+If the denial causes a real failure and component-specific guidance supports a change:
+    Find AppID {15C20B67-12E7-4BB6-92BB-7AFF07997402} in dcomcnfg.
+    Check that machine-wide launch/activation limits permit the request.
+    Record the existing AppID permissions.
+    In that AppID's Launch and Activation Permissions, allow:
+        Account:    NT AUTHORITY\SYSTEM (S-1-5-18)
+        Permission: Local Activation
+    Preserve the other permissions and retest the failing operation.
+    If it still fails, undo the change and investigate further.
+```
+
+The event therefore tells you **which application**, **which account**, and **which permission** to investigate. It does not call for granting every permission. Because this example concerns a Windows component, follow Microsoft's guidance rather than changing protected permissions just to remove the event.
 
 ---
 
 ## 7.8 Remote DCOM
+
+**Remote DCOM** lets a client use a COM object running on **another computer**, rather than in another process on the same computer. For example, a client on machine A can call a calculator hosted on machine B. The client calls a local proxy, which communicates with the remote server over RPC. This requires network connectivity, authentication, and appropriate remote launch, activation, and access permissions.
 
 ### Activation
 
@@ -533,19 +612,25 @@ Event 10036, DistributedCOM:
 
 ---
 
-## 7.9 LAB 7.1 — Build an out-of-proc EXE server
+## 7.9 LAB 7.1 — Out-of-process hosting
 
 > **Requirements**
-> - **Tools:** Visual Studio C++; Process Explorer; `dcomcnfg` for inspection.
-> - **Elevation:** required — `YourServer.exe -RegServer` writes `LocalServer32` and the AppID under `HKLM`.
-> - **Bitness:** x64.
+> - **Tools:** Visual Studio C++; Process Explorer; `dcomcnfg` for inspection; Registry Editor (`regedit`) for Part B's targeted backup and cleanup. **A VM is optional; your Windows development machine is sufficient.**
+> - **Elevation:** required for EXE, DLL, proxy/stub, and surrogate registration.
+> - **Bitness:** x64 for Part A; an x86 DLL and x64 client for Part B.
 > - **Depends on:** **Lab 4.1's proxy/stub DLL, registered.** Out-of-proc is not optional about marshaling: with no proxy/stub and no TLB, `CoCreateInstance` returns `E_NOINTERFACE` and the lab stops at step one.
 > - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — a complete EXE server and client. Register [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` **first**.
-> - **Time:** ~3 h.
+> - **Part B also uses:** the x86 DLL and x64 client from [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/), plus the proxy/stub registered for both bitnesses.
+> - **Caution:** change only the training component's registration. Part B uses a fresh AppID and restores the original class-to-AppID link afterwards; do not change system-component permissions, `RunAs`, or machine-wide DCOM settings.
+> - **Time:** ~3.5–4 h, including a short surrogate comparison.
 
-Everything so far has run inside one process. This lab moves the same component into an EXE of its own, which changes activation from a `LoadLibrary` into a `CreateProcess` performed by the SCM — and makes marshaling mandatory rather than optional.
+This lab compares two ways to host an object outside its client: **your own EXE server**, and a **DLL loaded by Windows' `dllhost.exe` surrogate**. Both require marshaling across the process boundary. The main difference is who supplies the host process and its lifetime machinery.
 
-Two new problems arrive with the process boundary, and the code below solves both: telling the server it was started *by COM* rather than by a user (`-Embedding`), and knowing when it is safe to exit.
+### Part A: run the EXE server
+
+Follow the build and registration steps in [Stage 5's README](../labs/stage-5-exe-server/README.md), using its complete server and client. The excerpt below highlights the activation and shutdown path; it is not a replacement for the supplied source.
+
+Two responsibilities move into your server process: recognizing when COM started it (`-Embedding`), and knowing when it is safe to exit.
 
 ```cpp
 #include <windows.h>
@@ -644,7 +729,7 @@ HKCR\AppID\CalcSrv.exe
     AppID     = "{APPID}"
 ```
 
-### Exercises
+### Part A exercises
 
 1. Register, run the client with `CLSCTX_LOCAL_SERVER`. Watch `CalcSrv.exe` appear in Process Explorer, and disappear when the client releases.
 2. **Confirm you need marshaling.** Without a proxy/stub or typelib (Module 4), activation fails at `QueryInterface`. Register the marshaling and retry.
@@ -652,47 +737,36 @@ HKCR\AppID\CalcSrv.exe
 4. Compare `REGCLS_SINGLEUSE` vs `REGCLS_MULTIPLEUSE`: run two clients and count server processes.
 5. Time 10,000 calls in-proc vs out-of-proc. Expect roughly 100–1000× difference.
 
----
+### Part B: compare with a DLL surrogate
 
-## 7.10 LAB 7.2 — DLL surrogate
+A **surrogate** is a process that hosts a COM DLL on a client's behalf. You keep the DLL implementation; Windows supplies the EXE host. This short comparison completes the surrogate attempt from [Lab 2.2](02-activation-and-registry.md#27-lab-22--bitness), now with marshaling available. Allow about 30–45 minutes with the earlier builds available.
 
-> **Requirements**
-> - **Tools:** PowerShell (registry edits), Process Explorer, `dcomcnfg`.
-> - **Elevation:** required — AppID and CLSID writes under `HKLM`.
-> - **Bitness:** 32-bit DLL with a 64-bit client for the bridge step.
-> - **Depends on:** Lab 2.2 (the surrogate attempt you left failing) **and** Lab 4.1's registered proxy/stub — that registration is exactly what makes it work this time.
-> - **Starting point:** [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/) built x86 and registered, plus [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/) registered for **both** bitnesses.
-> - **Caution:** test machine or VM. Step 4 sets `RunAs = NT AUTHORITY\LocalService`, which changes the identity of every activation of that CLSID machine-wide. Export the AppID key first and remove the value when you are done.
-> - **Time:** ~90 min.
+**No VM is required.** Keep Part A's x64 EXE registered. The x86 DLL has its own CLSID registration in the **32-bit registry view**, and the client will explicitly request a 32-bit server. A fresh AppID keeps the surrogate settings separate from the EXE's AppID, even though the samples reuse the same CLSID.
 
-Now finish Lab 2.2 properly.
+1. **Prepare the DLL and marshaling support.** Reuse Lab 2.2's registered x86 DLL and Lab 4.1's x86 and x64 proxy/stub DLLs. If any is missing, build and register it using the matching 32-bit or 64-bit `regsvr32` as in those labs. Close the training clients and let `CalcSrv.exe` exit. **Do not run its `-UnregServer` command**: that would delete registration trees unnecessarily.
+2. **Back up the x86 class registration.** In Registry Editor, select `HKLM\SOFTWARE\Classes\Wow6432Node\CLSID\{your-calculator-clsid}` and use **File → Export → Selected branch**. Record whether its named `AppID` value exists and, if so, its exact value. Confirm that `InprocServer32` points to your x86 training DLL and that this x86 class registration has no `LocalServer32`, `LocalServer`, or `LocalService` entry. An EXE/service entry would take precedence over surrogate hosting; if one is present, stop and identify the conflicting registration instead of deleting it blindly. Leave the separate x64 CLSID key untouched.
+3. **Configure a temporary surrogate AppID.** Generate a fresh GUID using **Tools → Create GUID → Registry Format** in Visual Studio, and record it for cleanup. Under `HKLM\SOFTWARE\Classes\AppID`, create a key named with that GUID and add a **String Value** named `DllSurrogate` with empty data. Set the **String Value** named `AppID` on the x86 CLSID key from step 2 to this new GUID. Do not reuse or modify Part A's AppID, and do not change permissions or `RunAs`.
+4. **Call the 32-bit DLL from the 64-bit client.** Record Stage 2's current client activation flags, then use `CLSCTX_LOCAL_SERVER | CLSCTX_ACTIVATE_32_BIT_SERVER` as the activation context. The extra flag requests a 32-bit server; it does not load a 32-bit DLL into the 64-bit client. Build and run the x64 client. Pause it in the debugger before its final `Release` so the server remains available for inspection.
+5. **Verify where the DLL runs.** In Process Explorer, locate the **32-bit `dllhost.exe`** that loaded your test DLL; **Ctrl+D** displays the selected process's DLL list. Confirm that the client is 64-bit and the DLL is inside that separate 32-bit host. Record the call result and both process architectures.
+6. **Undo the temporary configuration, even if activation failed.** Let the client release its interfaces and exit. Restore the x86 CLSID's original `AppID` value; if it was absent, remove only the value you added. Delete only the fresh AppID key created in step 3, not the CLSID key or any pre-existing AppID. Restore Stage 2's original client activation flags and rebuild it. Run Part A's unmodified x64 client to confirm that it still activates `CalcSrv.exe`. Labs 7.2 and 7.3 reuse that EXE server.
 
-```powershell
-$clsid = "{A1B2C3D4-1111-4000-9000-000000000001}"
-$appid = "{B1B2C3D4-2222-4000-9000-000000000002}"
+The exported branch is a backup, but **importing a `.reg` file merges values; it does not remove newly added ones**. That is why cleanup explicitly removes an `AppID` value that did not exist before. The prerequisite DLL and proxy/stub registrations remain available for the course; only the temporary surrogate configuration is removed. Do not terminate unrelated `dllhost.exe` processes.
 
-New-Item "HKLM:\SOFTWARE\Classes\AppID\$appid" -Force | Out-Null
-Set-ItemProperty "HKLM:\SOFTWARE\Classes\AppID\$appid" -Name "(default)" -Value "Calc Surrogate"
-Set-ItemProperty "HKLM:\SOFTWARE\Classes\AppID\$appid" -Name "DllSurrogate" -Value ""
-Set-ItemProperty "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Name "AppID" -Value $appid
-```
+**What this proves:** an in-process client must match its DLL's bitness, but an out-of-process call can cross bitness when both sides have the required marshaling support. The DLL did not become an EXE; the surrogate supplied its host. Custom surrogates are outside this lab, and server identity is covered in Lab 7.2.
 
-1. Activate with `CLSCTX_LOCAL_SERVER`. Confirm in Process Explorer that a **`dllhost.exe`** appeared and has loaded your DLL (Ctrl+D, find your DLL).
-2. Confirm the bitness bridge works: 32-bit DLL, 64-bit client.
-3. Set `DllSurrogate` to a **custom** surrogate EXE path instead of `""` and observe the difference.
-4. Now combine with `RunAs`: set `RunAs = NT AUTHORITY\LocalService` and observe that `dllhost.exe` runs under that account. Check what breaks (registry access, file access, network identity) — this is exactly how "it works for me, fails in production" arises.
+**Deliverable:** compare the three configurations you have now seen: an in-process DLL, your EXE server, and the DLL in `dllhost.exe`. For each, record the host process, whether calls cross a process boundary, and whether the client must match the component's bitness.
 
 ---
 
-## 7.11 LAB 7.3 — Permissions and Event 10016
+## 7.10 LAB 7.2 — Permissions and Event 10016
 
 > **Requirements**
 > - **Tools:** `dcomcnfg` (Component Services), Event Viewer / `Get-WinEvent`, and a test account for the `RunAs` steps.
 > - **Elevation:** required throughout.
 > - **Bitness:** `dcomcnfg` shows the **64-bit** DCOM config. For a 32-bit AppID run `mmc comexp.msc /32` — a component that "isn't in the list" is usually this.
-> - **Depends on:** an AppID **you own**, from Lab 7.1 or 7.2.
+> - **Depends on:** the working EXE server and its AppID from Lab 7.1 Part A, restored after the surrogate comparison.
 > - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — it registers AppID `{B1B2C3D4-2222-4000-9000-000000000002}`, which is the one to edit in `dcomcnfg`. Export that key before you touch it.
-> - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.8 tells you not to do.
+> - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.7 tells you not to do.
 > - **Time:** ~2 h.
 
 Launch and Access permissions are configured in different places, checked at different times, and confused constantly — including in a great deal of published advice.
@@ -723,14 +797,14 @@ E_ACCESSDENIED on activation
 
 ---
 
-## 7.12 LAB 7.4 — Remote DCOM
+## 7.11 LAB 7.3 — Remote DCOM
 
 > **Requirements**
 > - **Machines:** **two** machines or VMs on the same network or domain — there is no single-box substitute for this lab.
 > - **Tools:** firewall control on B (`New-NetFirewallRule`), `Test-NetConnection`, PortQry or `rpcdump`, Event Viewer on B, `dcomcnfg` on both.
 > - **Elevation:** required on **both** machines.
 > - **Bitness:** identical on both ends.
-> - **Depends on:** the Lab 7.1 EXE server, with the proxy/stub or type library registered on **A and B**. Registering it only on the server is the classic remote-DCOM failure and is worth reproducing on purpose.
+> - **Depends on:** the Lab 7.1 Part A EXE server, with working local activation and the proxy/stub or type library registered on **A and B**. Undo Lab 7.2's deliberate permission and identity failures before starting. Registering the marshaling support only on the server is the classic remote-DCOM failure and is worth reproducing on purpose.
 > - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on machine B, and [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` registered on **both** machines.
 > - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
 > - **Time:** ~3 h.
@@ -756,7 +830,7 @@ The method is one variable at a time — break a single thing, record the HRESUL
 
 ---
 
-## 7.13 Security checklist for reviewing a COM server
+## 7.12 Security checklist for reviewing a COM server
 
 Use this when a customer asks "is our component configured safely?"
 
@@ -778,7 +852,7 @@ That last group is the one that matters most in security reviews: **an out-of-pr
 
 ---
 
-## 7.14 The DCOM support triage flow
+## 7.13 The DCOM support triage flow
 
 ```
 Activation or call failure in an out-of-proc / remote scenario
@@ -820,7 +894,7 @@ Print this. It is the module's deliverable.
 
 ---
 
-## 7.15 Checkpoint
+## 7.14 Checkpoint
 
 1. Distinguish Launch permission from Access permission: when is each evaluated, and how does the failure differ?
 2. In what order are `MachineLaunchRestriction`, the AppID's `LaunchPermission`, and `DefaultLaunchPermission` evaluated? Why does that order defeat a common "fix"?
@@ -857,7 +931,7 @@ Print this. It is the module's deliverable.
 
 ---
 
-## 7.16 Rules to carry forward
+## 7.15 Rules to carry forward
 
 1. CLSID is per-class; AppID is per-process. Security lives on the AppID.
 2. Launch ≠ Access. Check which one the event names before touching anything.

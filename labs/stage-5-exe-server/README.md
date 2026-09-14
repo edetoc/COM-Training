@@ -1,6 +1,6 @@
 # Stage 5 — the out-of-process EXE server
 
-**Used by:** Labs 7.1, 7.3, 7.4
+**Used by:** Lab 7.1 Part A, Lab 7.2 (permissions), and Lab 7.3 (remote DCOM)
 
 The same `Calculator`, now living in its own process. Activation stops being a `LoadLibrary` and
 becomes a `CreateProcess` performed by the SCM, with a security check in front of it.
@@ -59,7 +59,7 @@ That start-on-demand, exit-when-idle behaviour is the whole point of the stage. 
 | `0x80040154` | not registered | run `CalcSrv.exe -RegServer` **elevated** |
 | `0x80004002` | no marshaling | register Stage 3's `CalcPS.dll` |
 | `0x80080005` | server failed to start | run `CalcSrv.exe` by hand — it should show a message box; check the Application event log |
-| `0x80070005` | access denied | Launch permission (§7.6). Expected during Lab 7.3 |
+| `0x80070005` | access denied | Launch permission (§7.6). Expected during Lab 7.2 |
 
 ## Cleaning up
 
@@ -67,7 +67,7 @@ That start-on-demand, exit-when-idle behaviour is the whole point of the stage. 
 & ".\x64\CalcSrv.exe" -UnregServer     # elevated
 ```
 
-Lab 7.3 edits this AppID's security in `dcomcnfg`. **Export
+Lab 7.2 edits this AppID's security in `dcomcnfg`. **Export
 `HKCR\AppID\{B1B2C3D4-2222-4000-9000-000000000002}` before you start**, and prefer a VM.
 
 ## Notes
