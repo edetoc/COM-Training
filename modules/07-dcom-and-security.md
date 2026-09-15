@@ -615,100 +615,42 @@ Event 10036, DistributedCOM:
 ## 7.9 LAB 7.1 — Out-of-process hosting
 
 > **Requirements**
-> - **Tools:** Visual Studio C++; Process Explorer; `dcomcnfg` for inspection; Registry Editor (`regedit`) for Part B's targeted backup and cleanup. **A VM is optional; your Windows development machine is sufficient.**
+> - **Tools:** Visual Studio with Desktop development with C++ and a Windows SDK; Process Explorer; 64-bit PowerShell; `dcomcnfg` for inspection. **No VM is required.**
 > - **Elevation:** required for EXE, DLL, proxy/stub, and surrogate registration.
-> - **Bitness:** x64 for Part A; an x86 DLL and x64 client for Part B.
-> - **Depends on:** **Lab 4.1's proxy/stub DLL, registered.** Out-of-proc is not optional about marshaling: with no proxy/stub and no TLB, `CoCreateInstance` returns `E_NOINTERFACE` and the lab stops at step one.
-> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — a complete EXE server and client. Register [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` **first**.
-> - **Part B also uses:** the x86 DLL and x64 client from [`labs/stage-2-inproc-server/`](../labs/stage-2-inproc-server/), plus the proxy/stub registered for both bitnesses.
-> - **Caution:** change only the training component's registration. Part B uses a fresh AppID and restores the original class-to-AppID link afterwards; do not change system-component permissions, `RunAs`, or machine-wide DCOM settings.
-> - **Time:** ~3.5–4 h, including a short surrogate comparison.
+> - **Bitness:** x64 throughout the main lab. The x86 comparison is optional.
+> - **Depends on:** the earlier concepts, but **no earlier lab projects, binaries, or registrations**.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) contains one solution with an EXE server, a DLL, a client, and their matching proxy/stub.
+> - **Caution:** the setup changes only this lab's registration. Do not change system-component permissions, `RunAs`, or machine-wide DCOM settings.
+> - **Time:** ~2–3 h; allow another ~30 min for the optional cross-bitness comparison.
 
 This lab compares two ways to host an object outside its client: **your own EXE server**, and a **DLL loaded by Windows' `dllhost.exe` surrogate**. Both require marshaling across the process boundary. The main difference is who supplies the host process and its lifetime machinery.
 
 ### Part A: run the EXE server
 
-Follow the build and registration steps in [Stage 5's README](../labs/stage-5-exe-server/README.md), using its complete server and client. The excerpt below highlights the activation and shutdown path; it is not a replacement for the supplied source.
+1. Open **Stage5.sln** from the starting folder. Build **Debug | x64**. It builds all four projects, including the proxy/stub generated from this lab's two-method IDL.
+2. In an **elevated 64-bit PowerShell** window, change to that folder and run `.\Setup.ps1 -Action Register`. This registers both hosting options and the proxy/stub; no registration from previous labs is used.
+3. In an **ordinary PowerShell** window in the same folder, run `.\x64\CalcSrvClient.exe`. Both `Add(40,2)` and `Subtract(44,2)` should return `42` with `hr=0x00000000`. The client waits for Enter so you can inspect the server process.
 
-Two responsibilities move into your server process: recognizing when COM started it (`-Embedding`), and knowing when it is safe to exit.
+The complete build, troubleshooting, and cleanup instructions are in [Stage 5's README](../labs/stage-5-exe-server/README.md). Follow the startup path in [CalcSrv.cpp](../labs/stage-5-exe-server/CalcSrv.cpp):
 
-```cpp
-#include <windows.h>
-#include <objbase.h>
-#include "Calculator.h"
+| Code to find | Responsibility |
+|---|---|
+| `wWinMain`'s `-Embedding` check | Distinguishes a COM launch from a manual launch |
+| `CoInitializeEx` | Initializes the main thread's MTA participation |
+| `CoInitializeSecurity` with `EOAC_APPID` | Reads this EXE's AppID call-security policy before marshaling begins |
+| `PeekMessageW` | Creates the main thread's message queue before calls can arrive |
+| `CoRegisterClassObject` | Publishes the factory in a suspended state |
+| `CoResumeClassObjects` | Starts accepting activations after initialization succeeds |
+| `GetMessageW` | Keeps the main thread alive until it receives the shutdown message |
+| `CoRevokeClassObject` and `CoUninitialize` | Withdraw the factory and finish COM cleanup |
 
-static DWORD g_dwRegister = 0;
-
-// The factory from Module 2, plus server-process lifetime management.
-class CalculatorFactory : public IClassFactory
-{
-public:
-    // ... QueryInterface/AddRef/Release as before ...
-
-    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv) override
-    {
-        if (!ppv) return E_POINTER;
-        *ppv = nullptr;
-        if (pUnkOuter) return CLASS_E_NOAGGREGATION;
-
-        auto* p = new (std::nothrow) Calculator();
-        if (!p) return E_OUTOFMEMORY;
-        HRESULT hr = p->QueryInterface(riid, ppv);
-        p->Release();
-        return hr;
-    }
-
-    HRESULT STDMETHODCALLTYPE LockServer(BOOL fLock) override
-    {
-        if (fLock) CoAddRefServerProcess();
-        else if (CoReleaseServerProcess() == 0) PostQuitMessage(0);
-        return S_OK;
-    }
-};
-
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR pCmdLine, int)
-{
-    // The SCM launches us with "-Embedding" (or "/Embedding").
-    // Without it, we were started by a user - handle registration/UI instead.
-    bool embedding = (wcsstr(pCmdLine, L"-Embedding") != nullptr) ||
-                     (wcsstr(pCmdLine, L"/Embedding") != nullptr);
-    if (wcsstr(pCmdLine, L"-RegServer")) { RegisterServer();   return 0; }
-    if (wcsstr(pCmdLine, L"-UnregServer")) { UnregisterServer(); return 0; }
-    if (!embedding) { RegisterServer(); return 0; }
-
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    static CalculatorFactory factory;
-    HRESULT hr = CoRegisterClassObject(
-        CLSID_Calculator, &factory,
-        CLSCTX_LOCAL_SERVER,
-        REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED,     // suspended: don't serve calls yet
-        &g_dwRegister);
-
-    if (SUCCEEDED(hr))
-    {
-        CoResumeClassObjects();     // NOW start accepting activations - avoids a race
-
-        MSG msg;
-        while (GetMessageW(&msg, nullptr, 0, 0))
-        {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        CoRevokeClassObject(g_dwRegister);
-    }
-
-    CoUninitialize();
-    return 0;
-}
-```
+The calculator's constructor/destructor and the factory's `LockServer` method update the process lock count through `ServerLock` and `ServerUnlock`. When the count reaches zero, `ServerUnlock` suspends activation and posts the shutdown message to the **main thread**, even when the last release arrives on a COM worker thread. Creating that thread's message queue before publishing the factory prevents a startup race in which the shutdown message could be lost.
 
 ### `REGCLS` flags
 
 | Flag | Meaning |
 |---|---|
-| `REGCLS_SINGLEUSE` | One object per server process; the next activation launches a new process |
+| `REGCLS_SINGLEUSE` | Removes the class registration after one connection to its class object; this is not an object-count limit |
 | `REGCLS_MULTIPLEUSE` | Many objects per process; also registers for in-proc use |
 | `REGCLS_MULTI_SEPARATE` | Many objects, but **not** registered for in-proc — the usual choice for an EXE server |
 | `REGCLS_SUSPENDED` | Register but don't serve until `CoResumeClassObjects` |
@@ -718,43 +660,46 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR pCmdLine, int)
 
 ### Registration
 
-```
+The EXE registration has this shape; `{CLSID}` and `{APPID}` are this lab's dedicated EXE identifiers, listed in the [registration reference](../labs/stage-5-exe-server/README.md#registration-reference). The path below is illustrative; setup records the actual build path.
+
+```text
 HKCR\CLSID\{CLSID}\LocalServer32
     (Default) = "C:\Components\CalcSrv.exe"
 HKCR\CLSID\{CLSID}
     AppID     = "{APPID}"
 HKCR\AppID\{APPID}
-    (Default) = "Calculator Server"
-HKCR\AppID\CalcSrv.exe
-    AppID     = "{APPID}"
+    (Default) = "Stage 5 Calculator EXE"
 ```
+
+Unlike the `nullptr` example in §7.4, this lab passes its AppID GUID directly to `CoInitializeSecurity` with `EOAC_APPID`. It therefore does not need an `AppID\CalcSrv.exe` lookup entry and cannot overwrite another sample's filename-based mapping. The CLSID-to-AppID link above is still needed for activation policy.
 
 ### Part A exercises
 
-1. Register, run the client with `CLSCTX_LOCAL_SERVER`. Watch `CalcSrv.exe` appear in Process Explorer, and disappear when the client releases.
-2. **Confirm you need marshaling.** Without a proxy/stub or typelib (Module 4), activation fails at `QueryInterface`. Register the marshaling and retry.
-3. **Kill the server mid-call.** Add a `Sleep(10000)` in `Add`, call it, and `taskkill` the server. The client gets `RPC_E_DISCONNECTED` (`0x80010108`) or `RPC_S_SERVER_UNAVAILABLE`. Note that all subsequent calls on that proxy also fail — **a dead proxy never recovers**; you must re-activate.
-4. Compare `REGCLS_SINGLEUSE` vs `REGCLS_MULTIPLEUSE`: run two clients and count server processes.
-5. Time 10,000 calls in-proc vs out-of-proc. Expect roughly 100–1000× difference.
+1. **Observe lifetime.** While the client waits, find `CalcSrv.exe` in Process Explorer. Press Enter; releasing the final object lets the EXE exit. Repeat with two clients: releasing one should not stop the server while the other still holds an object.
+2. **Follow activation in source.** Find `CoRegisterClassObject`, `CoResumeClassObjects`, `CalculatorFactory::CreateInstance`, and `ServerUnlock`. Explain which makes the factory available, which creates the calculator, and which lets the process exit.
+3. **Confirm the marshaling dependency is local to this lab.** After closing clients, temporarily unregister **only** this lab's x64 proxy from elevated 64-bit PowerShell:
+
+    ```powershell
+    & "$env:SystemRoot\System32\regsvr32.exe" /u "$PWD\x64\Stage5PS.dll"
+    ```
+
+    Run the EXE client normally and record the failure. Register the same DLL again using the command without `/u`, then confirm success. Do not unregister an earlier module's proxy. The exact failure stage may vary, but this custom interface cannot cross the process boundary without its marshaler.
+4. **Observe a server failure.** Add `Sleep(10000)` at the beginning of the EXE's `Add`, rebuild with clients closed, then run the client and end **that CalcSrv.exe instance** while the call waits. Record the failing HRESULT. A disconnected proxy cannot reconnect itself; a fresh activation is required. Remove the delay and rebuild after the experiment.
 
 ### Part B: compare with a DLL surrogate
 
-A **surrogate** is a process that hosts a COM DLL on a client's behalf. You keep the DLL implementation; Windows supplies the EXE host. This short comparison completes the surrogate attempt from [Lab 2.2](02-activation-and-registry.md#27-lab-22--bitness), now with marshaling available. Allow about 30–45 minutes with the earlier builds available.
+A **surrogate** is a process that hosts a COM DLL on a client's behalf. This solution supplies its own DLL and matching marshaler, so you can revisit the idea from Lab 2.2 without depending on that lab's setup.
 
-**No VM is required.** Keep Part A's x64 EXE registered. The x86 DLL has its own CLSID registration in the **32-bit registry view**, and the client will explicitly request a 32-bit server. A fresh AppID keeps the surrogate settings separate from the EXE's AppID, even though the samples reuse the same CLSID.
+1. Run `.\x64\CalcSrvClient.exe --surrogate`. Both arithmetic results should still be `42`. While the client waits, locate the `dllhost.exe` containing **this folder's CalcDll.dll** in Process Explorer; **Ctrl+D** shows its DLL list. The client's printed host label describes its request, so verify the actual loaded DLL rather than relying on the label alone.
+2. Release the object with Enter. Run `.\x64\CalcSrvClient.exe --inproc` and inspect the client process: the same DLL is now loaded inside `CalcSrvClient.exe` instead of `dllhost.exe`. Windows manages the surrogate's idle shutdown; do not expect the EXE server's immediate exit timing or terminate unrelated `dllhost.exe` processes.
+3. Compare [CalcSrvClient.cpp](../labs/stage-5-exe-server/CalcSrvClient.cpp)'s three activation choices. The EXE and DLL use different CLSIDs; the DLL's in-process and surrogate calls use the **same CLSID** with different `CLSCTX` flags. The setup remains unchanged throughout.
+4. Run the default client again to confirm the EXE still works. Keep this registration for Labs 7.2 and 7.3. When finished with Module 7, run `.\Setup.ps1 -Action Unregister` from elevated 64-bit PowerShell, with clients closed.
 
-1. **Prepare the DLL and marshaling support.** Reuse Lab 2.2's registered x86 DLL and Lab 4.1's x86 and x64 proxy/stub DLLs. If any is missing, build and register it using the matching 32-bit or 64-bit `regsvr32` as in those labs. Close the training clients and let `CalcSrv.exe` exit. **Do not run its `-UnregServer` command**: that would delete registration trees unnecessarily.
-2. **Back up the x86 class registration.** In Registry Editor, select `HKLM\SOFTWARE\Classes\Wow6432Node\CLSID\{your-calculator-clsid}` and use **File → Export → Selected branch**. Record whether its named `AppID` value exists and, if so, its exact value. Confirm that `InprocServer32` points to your x86 training DLL and that this x86 class registration has no `LocalServer32`, `LocalServer`, or `LocalService` entry. An EXE/service entry would take precedence over surrogate hosting; if one is present, stop and identify the conflicting registration instead of deleting it blindly. Leave the separate x64 CLSID key untouched.
-3. **Configure a temporary surrogate AppID.** Generate a fresh GUID using **Tools → Create GUID → Registry Format** in Visual Studio, and record it for cleanup. Under `HKLM\SOFTWARE\Classes\AppID`, create a key named with that GUID and add a **String Value** named `DllSurrogate` with empty data. Set the **String Value** named `AppID` on the x86 CLSID key from step 2 to this new GUID. Do not reuse or modify Part A's AppID, and do not change permissions or `RunAs`.
-4. **Call the 32-bit DLL from the 64-bit client.** Record Stage 2's current client activation flags, then use `CLSCTX_LOCAL_SERVER | CLSCTX_ACTIVATE_32_BIT_SERVER` as the activation context. The extra flag requests a 32-bit server; it does not load a 32-bit DLL into the 64-bit client. Build and run the x64 client. Pause it in the debugger before its final `Release` so the server remains available for inspection.
-5. **Verify where the DLL runs.** In Process Explorer, locate the **32-bit `dllhost.exe`** that loaded your test DLL; **Ctrl+D** displays the selected process's DLL list. Confirm that the client is 64-bit and the DLL is inside that separate 32-bit host. Record the call result and both process architectures.
-6. **Undo the temporary configuration, even if activation failed.** Let the client release its interfaces and exit. Restore the x86 CLSID's original `AppID` value; if it was absent, remove only the value you added. Delete only the fresh AppID key created in step 3, not the CLSID key or any pre-existing AppID. Restore Stage 2's original client activation flags and rebuild it. Run Part A's unmodified x64 client to confirm that it still activates `CalcSrv.exe`. Labs 7.2 and 7.3 reuse that EXE server.
+**Optional cross-bitness extension:** build **Debug | x86** in the same solution, run `.\Setup.ps1 -Action Register -Architecture x86` from elevated 64-bit PowerShell, then run `.\x64\CalcSrvClient.exe --surrogate --x86` normally. Confirm a 64-bit client calls the DLL in a 32-bit `dllhost.exe`. Unregister the optional x86 build before the final x64 cleanup. The [Stage 5 README](../labs/stage-5-exe-server/README.md#optional-64-bit-client-32-bit-surrogate) has the complete commands.
 
-The exported branch is a backup, but **importing a `.reg` file merges values; it does not remove newly added ones**. That is why cleanup explicitly removes an `AppID` value that did not exist before. The prerequisite DLL and proxy/stub registrations remain available for the course; only the temporary surrogate configuration is removed. Do not terminate unrelated `dllhost.exe` processes.
+**What this proves:** the client-facing interface can stay the same while the host changes. Out-of-process calls need marshaling; a DLL loaded directly into the client does not cross that process boundary. The optional extension additionally shows why marshaled calls can cross bitness.
 
-**What this proves:** an in-process client must match its DLL's bitness, but an out-of-process call can cross bitness when both sides have the required marshaling support. The DLL did not become an EXE; the surrogate supplied its host. Custom surrogates are outside this lab, and server identity is covered in Lab 7.2.
-
-**Deliverable:** compare the three configurations you have now seen: an in-process DLL, your EXE server, and the DLL in `dllhost.exe`. For each, record the host process, whether calls cross a process boundary, and whether the client must match the component's bitness.
+**Deliverable:** compare the in-process DLL, EXE server, and DLL in `dllhost.exe`: name the host process, state whether marshaling is needed across processes, and explain who manages host lifetime. No custom surrogate, server-identity change, or VM checkpoint is needed.
 
 ---
 
@@ -764,8 +709,8 @@ The exported branch is a backup, but **importing a `.reg` file merges values; it
 > - **Tools:** `dcomcnfg` (Component Services), Event Viewer / `Get-WinEvent`, and a test account for the `RunAs` steps.
 > - **Elevation:** required throughout.
 > - **Bitness:** `dcomcnfg` shows the **64-bit** DCOM config. For a 32-bit AppID run `mmc comexp.msc /32` — a component that "isn't in the list" is usually this.
-> - **Depends on:** the working EXE server and its AppID from Lab 7.1 Part A, restored after the surrogate comparison.
-> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — it registers AppID `{B1B2C3D4-2222-4000-9000-000000000002}`, which is the one to edit in `dcomcnfg`. Export that key before you touch it.
+> - **Depends on:** Lab 7.1's x64 setup, which remains registered after the hosting comparison.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — select **Stage 5 Calculator EXE**, AppID `{A57CC9FD-4A41-4579-9D75-97ECC20C504B}`, in `dcomcnfg`. Export that key before you touch it. The EXE reads its AppID policy through `CoInitializeSecurity` with `EOAC_APPID`; close existing clients and let it exit between tests so a new process reads the changed policy.
 > - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.7 tells you not to do.
 > - **Time:** ~2 h.
 
@@ -804,8 +749,8 @@ E_ACCESSDENIED on activation
 > - **Tools:** firewall control on B (`New-NetFirewallRule`), `Test-NetConnection`, PortQry or `rpcdump`, Event Viewer on B, `dcomcnfg` on both.
 > - **Elevation:** required on **both** machines.
 > - **Bitness:** identical on both ends.
-> - **Depends on:** the Lab 7.1 Part A EXE server, with working local activation and the proxy/stub or type library registered on **A and B**. Undo Lab 7.2's deliberate permission and identity failures before starting. Registering the marshaling support only on the server is the classic remote-DCOM failure and is worth reproducing on purpose.
-> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on machine B, and [`labs/stage-3-idl-marshaling/`](../labs/stage-3-idl-marshaling/)'s `CalcPS.dll` registered on **both** machines.
+> - **Depends on:** Lab 7.1's x64 EXE server and this lab's `Stage5PS.dll` registered on **A and B**. Undo Lab 7.2's deliberate permission and identity failures before starting. No Stage 3 registration is required.
+> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on B, registered with `Setup.ps1 -Action Register`; its x64 client and matching `Stage5PS.dll` on A. Register the proxy on A with x64 `regsvr32`. Build from the same IDL on both machines and use the EXE CLSID `{647E1E3B-42CF-4A82-B91E-6DCADB217D9B}`.
 > - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
 > - **Time:** ~3 h.
 
@@ -813,7 +758,7 @@ Local out-of-proc already works. This lab puts a network in the middle and shows
 
 The method is one variable at a time — break a single thing, record the HRESULT and which machine logged it, restore it. "It fails remotely" is not a diagnosis; this lab is how you turn it into one.
 
-1. Register the server on machine B, and the **proxy/stub or type library on both A and B**. (Forgetting the client-side marshaling registration is a classic remote-DCOM failure.)
+1. Register the Stage 5 server on machine B, and **its matching Stage5PS.dll on both A and B**. (Forgetting the client-side marshaling registration is a classic remote-DCOM failure.)
 2. From machine A, activate with `CoCreateInstanceEx` + `COSERVERINFO`.
 3. Grant **Remote Launch** and **Remote Activation** to the calling principal on B's AppID, and **Remote Access** for calls.
 4. **Break it and diagnose, one variable at a time:**

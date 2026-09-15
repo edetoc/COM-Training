@@ -1,0 +1,34 @@
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+    object,
+    uuid(68AE8A82-BD63-4110-9FBF-C649EF09C3D8),
+    pointer_default(unique)
+]
+interface ICalculator : IUnknown
+{
+    HRESULT Add([in] LONG left, [in] LONG right, [out, retval] LONG* result);
+    HRESULT Subtract([in] LONG left, [in] LONG right, [out, retval] LONG* result);
+}
+
+[
+    uuid(9A83D504-799B-44BF-8E7D-3AC3B7877F06),
+    version(1.0)
+]
+library Stage5CalculatorLib
+{
+    importlib("stdole2.tlb");
+
+    [uuid(647E1E3B-42CF-4A82-B91E-6DCADB217D9B)]
+    coclass Calculator
+    {
+        [default] interface ICalculator;
+    };
+
+    [uuid(21C831C0-DA4D-4727-97C4-E52ED08D9F18)]
+    coclass SurrogateCalculator
+    {
+        [default] interface ICalculator;
+    };
+};

@@ -39,6 +39,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)$(PlatformShortName)\generated\$(Configuration);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <WarningLevel>Level4</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <SDLCheck>true</SDLCheck>
@@ -53,9 +54,17 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CalcSrv.cpp" />
+    <ClCompile Include="$(ProjectDir)$(PlatformShortName)\generated\$(Configuration)\Calculator_i.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Calculator.h" />
+    <ClInclude Include="Registration.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="CalcPS.vcxproj">
+      <Project>{6F83C319-3A92-4471-9CBE-206056F79FA6}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

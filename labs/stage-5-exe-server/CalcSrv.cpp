@@ -1,5 +1,6 @@
 #include <initguid.h>     // must precede Calculator.h: defines the GUIDs in this TU
 #include "Calculator.h"
+#include "Registration.h"
 
 #include <objbase.h>
 #include <olectl.h>
@@ -99,79 +100,15 @@ public:
     }
 };
 
-// ------------------------------------------------------------ registration
-static HRESULT SetKeyValue(HKEY root, PCWSTR subkey, PCWSTR name, PCWSTR value)
-{
-    HKEY hKey = nullptr;
-    LONG rc = RegCreateKeyExW(root, subkey, 0, nullptr, REG_OPTION_NON_VOLATILE,
-                              KEY_WRITE, nullptr, &hKey, nullptr);
-    if (rc != ERROR_SUCCESS) return HRESULT_FROM_WIN32(rc);
-    rc = RegSetValueExW(hKey, name, 0, REG_SZ,
-                        reinterpret_cast<const BYTE*>(value),
-                        static_cast<DWORD>((wcslen(value) + 1) * sizeof(WCHAR)));
-    RegCloseKey(hKey);
-    return HRESULT_FROM_WIN32(rc);
-}
-
-static HRESULT RegisterServer()
-{
-    WCHAR exePath[MAX_PATH];
-    if (!GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath)))
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    WCHAR clsidStr[64], appidStr[64], key[256];
-    StringFromGUID2(CLSID_Calculator, clsidStr, ARRAYSIZE(clsidStr));
-    StringFromGUID2(APPID_CalcSrv,    appidStr, ARRAYSIZE(appidStr));
-
-    // HKCR\CLSID\{clsid}
-    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s", clsidStr);
-    SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, L"Calculator Server");
-    SetKeyValue(HKEY_CLASSES_ROOT, key, L"AppID", appidStr);      // links class -> process
-
-    // HKCR\CLSID\{clsid}\LocalServer32   <- an EXE, not a DLL
-    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s\\LocalServer32", clsidStr);
-    SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, exePath);
-
-    // HKCR\CLSID\{clsid}\ProgID
-    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s\\ProgID", clsidStr);
-    SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, L"Training.CalcSrv.1");
-    SetKeyValue(HKEY_CLASSES_ROOT, L"Training.CalcSrv.1", nullptr, L"Calculator Server");
-    SetKeyValue(HKEY_CLASSES_ROOT, L"Training.CalcSrv.1\\CLSID", nullptr, clsidStr);
-
-    // HKCR\AppID\{appid}  - process-wide settings live here (Module 7)
-    StringCchPrintfW(key, ARRAYSIZE(key), L"AppID\\%s", appidStr);
-    SetKeyValue(HKEY_CLASSES_ROOT, key, nullptr, L"Calculator Server");
-
-    // HKCR\AppID\CalcSrv.exe  - lets the SCM map the EXE name back to the AppID
-    SetKeyValue(HKEY_CLASSES_ROOT, L"AppID\\CalcSrv.exe", L"AppID", appidStr);
-
-    return S_OK;
-}
-
-static HRESULT UnregisterServer()
-{
-    WCHAR clsidStr[64], appidStr[64], key[256];
-    StringFromGUID2(CLSID_Calculator, clsidStr, ARRAYSIZE(clsidStr));
-    StringFromGUID2(APPID_CalcSrv,    appidStr, ARRAYSIZE(appidStr));
-
-    StringCchPrintfW(key, ARRAYSIZE(key), L"CLSID\\%s", clsidStr);
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, key);
-    StringCchPrintfW(key, ARRAYSIZE(key), L"AppID\\%s", appidStr);
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, key);
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"AppID\\CalcSrv.exe");
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"Training.CalcSrv.1");
-    return S_OK;
-}
-
 // ------------------------------------------------------------------- entry
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR pCmdLine, int)
 {
     g_mainThreadId = GetCurrentThreadId();
 
     if (wcsstr(pCmdLine, L"-RegServer")   || wcsstr(pCmdLine, L"/RegServer"))
-        return SUCCEEDED(RegisterServer())   ? 0 : 1;
+        return SUCCEEDED(Stage5Registration::Register(false, nullptr)) ? 0 : 1;
     if (wcsstr(pCmdLine, L"-UnregServer") || wcsstr(pCmdLine, L"/UnregServer"))
-        return SUCCEEDED(UnregisterServer()) ? 0 : 1;
+        return SUCCEEDED(Stage5Registration::Unregister(false)) ? 0 : 1;
 
     // The SCM always launches us with "-Embedding". Started any other way, the
     // user ran us by hand - do nothing rather than sit there invisibly.
@@ -189,6 +126,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR pCmdLine, int)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) return 1;
 
+    GUID securityAppId = APPID_CalcSrv;
+    hr = CoInitializeSecurity(&securityAppId, -1, nullptr, nullptr,
+                              RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IDENTIFY,
+                              nullptr, EOAC_APPID, nullptr);
+    if (FAILED(hr)) { CoUninitialize(); return 1; }
+
+    MSG msg = {};
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
     static CalculatorFactory factory;
     hr = CoRegisterClassObject(
         CLSID_Calculator, &factory,
@@ -198,13 +144,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR pCmdLine, int)
 
     if (SUCCEEDED(hr))
     {
-        CoResumeClassObjects();     // NOW start accepting activations - closes a race
+        hr = CoResumeClassObjects();
 
-        MSG msg;
-        while (GetMessageW(&msg, nullptr, 0, 0))
+        if (SUCCEEDED(hr))
         {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            BOOL status;
+            while ((status = GetMessageW(&msg, nullptr, 0, 0)) > 0)
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if (status == -1) hr = HRESULT_FROM_WIN32(GetLastError());
         }
 
         CoRevokeClassObject(g_dwRegister);

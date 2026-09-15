@@ -38,15 +38,15 @@ Reference material for topics the main modules use but don't stop to teach. Read
 
 ### Starting a lab without doing the previous one
 
-The course grows **one** `Calculator` component across all eight modules, so labs build on each other. [`labs/`](labs/) holds a working snapshot of that component at each of five stages, so any lab can be started cold:
+The course develops the `Calculator` example through five stages in [`labs/`](labs/). Labs build on earlier concepts; each stage supplies starting code. Stage 5 is self-contained, including its own DLL and proxy/stub, so Module 7 does not require earlier lab registrations.
 
 | Stage | Folder | Labs that start here |
 |---|---|---|
 | 1 — manual `IUnknown` | [`labs/stage-1-manual-iunknown/`](labs/stage-1-manual-iunknown/) | 1.1, 1.2 |
 | 2 — in-proc DLL server | [`labs/stage-2-inproc-server/`](labs/stage-2-inproc-server/) | 2.1–2.4, 3.1–3.3, 6.1 |
-| 3 — IDL and proxy/stub | [`labs/stage-3-idl-marshaling/`](labs/stage-3-idl-marshaling/) | 4.1–4.3, 7.2 |
+| 3 — IDL and proxy/stub | [`labs/stage-3-idl-marshaling/`](labs/stage-3-idl-marshaling/) | 4.1–4.3 |
 | 4 — ATL rewrite | [`labs/stage-4-atl-server/`](labs/stage-4-atl-server/) | 5.1, 5.2, 6.2, 6.3 |
-| 5 — out-of-proc EXE server | [`labs/stage-5-exe-server/`](labs/stage-5-exe-server/) | 7.1, 7.3, 7.4 |
+| 5 — self-contained hosting comparison | [`labs/stage-5-exe-server/`](labs/stage-5-exe-server/) | 7.1, 7.2, 7.3 |
 
 Every lab's **Requirements** block names the stage it starts from. Each stage folder has a README with build and verify steps — open its `.sln` in Visual Studio, pick a configuration, and build.
 
@@ -372,7 +372,7 @@ Implement a connection point, subscribe a sink, and confirm callbacks. Then remo
 - Remote DCOM: endpoint mapper (TCP 135), dynamic RPC port range, firewall rules, `DCOM hardening` (CVE-2021-26414 / `RequireIntegrityActivationAuthenticationLevel`) — a very common modern support topic.
 - Windows Firewall + `dcomcnfg` + `netsh` diagnostics.
 
-**Lab 7.1 — Out-of-process hosting.** Run the supplied EXE server with `CoRegisterClassObject` and examine activation, marshaling, and lifetime. Then make a short comparison with a DLL hosted in `dllhost.exe`, including a 64-bit client calling a 32-bit DLL. Restore the EXE setup afterwards.
+**Lab 7.1 — Out-of-process hosting.** Build one self-contained x64 solution with an EXE server, a DLL, a client, and their matching proxy/stub. Compare EXE, surrogate, and in-process hosting without changing earlier lab registrations. A 64-bit client calling a 32-bit surrogate is an optional extension.
 
 **Lab 7.2 — Permissions and Event 10016.** Use the EXE server's AppID to investigate launch versus access permissions and server identity. Reproduce a permission failure, read the corresponding event, and grant only the required right to the intended account.
 
