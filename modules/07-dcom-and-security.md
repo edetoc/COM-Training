@@ -615,7 +615,7 @@ Event 10036, DistributedCOM:
 ## 7.9 LAB 7.1 — Out-of-process hosting
 
 > **Requirements**
-> - **Tools:** Visual Studio with Desktop development with C++ and a Windows SDK; Process Explorer; 64-bit PowerShell; `dcomcnfg` for inspection. **No VM is required.**
+> - **Tools:** Visual Studio with Desktop development with C++ and a Windows SDK; [Process Explorer](https://learn.microsoft.com/en-us/sysinternals/downloads/process-explorer); 64-bit PowerShell; `dcomcnfg` for inspection.
 > - **Elevation:** required for EXE, DLL, proxy/stub, and surrogate registration.
 > - **Bitness:** x64 throughout the main lab. The x86 comparison is optional.
 > - **Depends on:** the earlier concepts, but **no earlier lab projects, binaries, or registrations**.
@@ -628,8 +628,18 @@ This lab compares two ways to host an object outside its client: **your own EXE 
 ### Part A: run the EXE server
 
 1. Open **Stage5.sln** from the starting folder. Build **Debug | x64**. It builds all four projects, including the proxy/stub generated from this lab's two-method IDL.
-2. In an **elevated 64-bit PowerShell** window, change to that folder and run `.\Setup.ps1 -Action Register`. This registers both hosting options and the proxy/stub; no registration from previous labs is used.
-3. In an **ordinary PowerShell** window in the same folder, run `.\x64\CalcSrvClient.exe`. Both `Add(40,2)` and `Subtract(44,2)` should return `42` with `hr=0x00000000`. The client waits for Enter so you can inspect the server process.
+
+    | Project | Purpose |
+    |---|---|
+    | `CalcSrv` | The calculator EXE server: runs in its own process and manages its factories and lifetime. |
+    | `CalcDll` | The calculator DLL: runs inside the client or in `dllhost.exe` for Part B's comparison. |
+    | `CalcSrvClient` | The test client: selects a host and calls the calculator's `Add` and `Subtract` methods. |
+    | `Stage5PS` | The proxy/stub DLL: generated from the IDL, it marshals calculator calls across process boundaries. |
+
+2. In an **elevated 64-bit PowerShell** window, change to the [labs/stage-5-exe-server](../labs/stage-5-exe-server/) folder (not its `x64` subfolder) and run `.\Setup.ps1 -Action Register`. This registers both hosting options and the proxy/stub; no registration from previous labs is used.
+3. In an **ordinary PowerShell** window in the same folder, run `.\x64\CalcSrvClient.exe`. Both `Add(40,2)` and `Subtract(44,2)` should return `42` with `hr=0x00000000`. The client then displays `Press Enter to release the object...` and pauses while still holding the calculator object, keeping the server alive.
+
+    **Before pressing Enter**, open Process Explorer and find `CalcSrvClient.exe` and `CalcSrv.exe`. They have different process IDs: the calculator runs in the server process, not inside the client. Return to the client's PowerShell window and press Enter. The client releases the object and exits; if no other client is using this server, `CalcSrv.exe` should exit too.
 
 The complete build, troubleshooting, and cleanup instructions are in [Stage 5's README](../labs/stage-5-exe-server/README.md). Follow the startup path in [CalcSrv.cpp](../labs/stage-5-exe-server/CalcSrv.cpp):
 
@@ -675,22 +685,58 @@ Unlike the `nullptr` example in §7.4, this lab passes its AppID GUID directly t
 
 ### Part A exercises
 
-1. **Observe lifetime.** While the client waits, find `CalcSrv.exe` in Process Explorer. Press Enter; releasing the final object lets the EXE exit. Repeat with two clients: releasing one should not stop the server while the other still holds an object.
-2. **Follow activation in source.** Find `CoRegisterClassObject`, `CoResumeClassObjects`, `CalculatorFactory::CreateInstance`, and `ServerUnlock`. Explain which makes the factory available, which creates the calculator, and which lets the process exit.
+1. **Test lifetime with two clients.** From the lab folder, run `.\x64\CalcSrvClient.exe` in two ordinary PowerShell windows, leaving both at the Enter prompt. In Process Explorer, confirm there are two client processes but only one `CalcSrv.exe`. Press Enter in one client: the server should stay alive because the other still holds an object. Press Enter in the remaining client: the server should now exit.
+2. **Follow activation in source.** Find these functions in [CalcSrv.cpp](../labs/stage-5-exe-server/CalcSrv.cpp) and match them to their roles:
+
+    | Function | What it does in this server |
+    |---|---|
+    | `CoRegisterClassObject` | Registers the existing factory for the calculator's CLSID. Because this call uses `REGCLS_SUSPENDED`, clients cannot use the registration yet. |
+    | `CoResumeClassObjects` | Makes the suspended factory registration available so COM can route activation requests to it. |
+    | `CalculatorFactory::CreateInstance` | Creates a calculator object and uses `QueryInterface` to return the interface the client requested. |
+    | `ServerUnlock` | Decrements the process lock count. When it reaches zero, suspends new activations and posts `WM_QUIT` to the main thread, letting it leave the message loop, clean up, and exit. |
+
 3. **Confirm the marshaling dependency is local to this lab.** After closing clients, temporarily unregister **only** this lab's x64 proxy from elevated 64-bit PowerShell:
 
     ```powershell
     & "$env:SystemRoot\System32\regsvr32.exe" /u "$PWD\x64\Stage5PS.dll"
     ```
 
-    Run the EXE client normally and record the failure. Register the same DLL again using the command without `/u`, then confirm success. Do not unregister an earlier module's proxy. The exact failure stage may vary, but this custom interface cannot cross the process boundary without its marshaler.
-4. **Observe a server failure.** Add `Sleep(10000)` at the beginning of the EXE's `Add`, rebuild with clients closed, then run the client and end **that CalcSrv.exe instance** while the call waits. Record the failing HRESULT. A disconnected proxy cannot reconnect itself; a fresh activation is required. Remove the delay and rebuild after the experiment.
+    Run the EXE client normally and record the failure. An expected result is:
+
+    ```text
+    CoCreateInstance failed: 0x80004002
+    ```
+
+    `0x80004002` is **`E_NOINTERFACE`**. In this experiment, the calculator class is still registered and implements `ICalculator`, but COM cannot marshal that interface back to the client without the proxy/stub registration. `CoCreateInstance` must return the requested interface, not just start the server. The client's next three lines are always-printed troubleshooting hints, **not three additional failures**.
+
+    Restore the proxy/stub from **elevated 64-bit PowerShell in the same lab folder**:
+
+    ```powershell
+    & "$env:SystemRoot\System32\regsvr32.exe" "$PWD\x64\Stage5PS.dll"
+    ```
+
+    Run `.\x64\CalcSrvClient.exe` again from ordinary PowerShell; both calls should return `42` with `hr=0x00000000`. Do not unregister an earlier module's proxy. The exact failure stage may vary, but this custom interface cannot cross the process boundary without its marshaler.
+4. **Observe a server failure.** Add `Sleep(10000);` at the beginning of `Calculator::Add` in [CalcSrv.cpp](../labs/stage-5-exe-server/CalcSrv.cpp) and rebuild **Debug | x64** with clients closed. Run `.\x64\CalcSrvClient.exe` and, during that ten-second delay, terminate **that CalcSrv.exe instance** using **Task Manager > Details > End task** or **Process Explorer > Kill Process**. Verify its executable path is your lab's `x64\CalcSrv.exe`; do not terminate the client. Do this **before the client prints the `Add` result**, not at its later Enter prompt.
+
+    **Expected behavior:** the interrupted `Add` returns a failing HRESULT. The client then attempts `Subtract` on the same disconnected proxy, which should also fail. In a local test, `Add` returned `0x800706BE` (RPC call failed) and `Subtract` returned `0x800706BA` (RPC server unavailable). The exact codes can vary with timing; record yours and ignore the arithmetic result values when a call failed.
+
+    **The client still waits for Enter after these failures.** Once `Press Enter to release the object...` appears, it is waiting for keyboard input, not for the dead server. Press Enter to release the proxy and exit, or run `.\x64\CalcSrvClient.exe --auto` to skip this final keyboard pause. `--auto` does not add a timeout to COM calls.
+
+    If you terminate the server **after** both results and the Enter prompt appear, no method call is in progress: the client is already waiting for keyboard input, and killing the server does not end that wait or change the completed results. If there is **no result and no Enter prompt** after terminating the correct server, that is a different symptom from this intentional pause; record the last output and confirm the killed process's path and PID.
+
+    A disconnected proxy cannot reconnect itself; a fresh activation is required. Remove the delay, rebuild, and run a new client to confirm both calls succeed again.
 
 ### Part B: compare with a DLL surrogate
 
 A **surrogate** is a process that hosts a COM DLL on a client's behalf. This solution supplies its own DLL and matching marshaler, so you can revisit the idea from Lab 2.2 without depending on that lab's setup.
 
-1. Run `.\x64\CalcSrvClient.exe --surrogate`. Both arithmetic results should still be `42`. While the client waits, locate the `dllhost.exe` containing **this folder's CalcDll.dll** in Process Explorer; **Ctrl+D** shows its DLL list. The client's printed host label describes its request, so verify the actual loaded DLL rather than relying on the label alone.
+1. Run `.\x64\CalcSrvClient.exe --surrogate`. Both arithmetic results should still be `42`. Leave the client at its Enter prompt while identifying the host in Process Explorer:
+
+    Press **Ctrl+F** (**Find > Find Handle or DLL**), search for `CalcDll.dll`, and find the **DLL** result whose full path matches this lab's x64 build, for example `C:\tmp\stage-5-exe-server\x64\CalcDll.dll`. Its **Process** should be `dllhost.exe`; note its **PID** (process ID). Do not select a result from another lab copy or the `x86` folder.
+
+    Double-click that result to select the hosting process, then close the search window. **Ctrl+D** shows its DLL list; confirm the same full DLL path there. This identifies the correct host among the other `dllhost.exe` processes. The client's printed `Host: dllhost.exe` label alone is not proof.
+
+    As a cross-check, open that process's **Properties > Image** and inspect **Command line**. For this lab's surrogate, it should contain `/Processid:{C714BFAA-5711-46A7-91E1-42E2B9A14920}`. Despite the switch's name, that GUID is the DLL's **AppID**, not the numeric PID. Both architectures use this AppID, so the loaded DLL's full path remains the distinguishing check.
 2. Release the object with Enter. Run `.\x64\CalcSrvClient.exe --inproc` and inspect the client process: the same DLL is now loaded inside `CalcSrvClient.exe` instead of `dllhost.exe`. Windows manages the surrogate's idle shutdown; do not expect the EXE server's immediate exit timing or terminate unrelated `dllhost.exe` processes.
 3. Compare [CalcSrvClient.cpp](../labs/stage-5-exe-server/CalcSrvClient.cpp)'s three activation choices. The EXE and DLL use different CLSIDs; the DLL's in-process and surrogate calls use the **same CLSID** with different `CLSCTX` flags. The setup remains unchanged throughout.
 4. Run the default client again to confirm the EXE still works. Keep this registration for Labs 7.2 and 7.3. When finished with Module 7, run `.\Setup.ps1 -Action Unregister` from elevated 64-bit PowerShell, with clients closed.
