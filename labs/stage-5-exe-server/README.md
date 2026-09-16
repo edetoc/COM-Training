@@ -57,6 +57,18 @@ Use **Ctrl+D** to show the selected process's DLLs. Press Enter to release the o
 
 For unattended checks, append `--auto`; the client exits nonzero on activation, call, or result failure. To debug the EXE, attach Visual Studio to `CalcSrv.exe` while the client is waiting. Set a breakpoint in `Calculator::Add`, then launch a second client to make another call. Startup breakpoints need a debugger attached before COM launches the server.
 
+## Remote DCOM: Lab 7.3
+
+The same client includes remote EXE activation; no source replacement or extra project is needed:
+
+```powershell
+.\x64\CalcSrvClient.exe --remote SERVER-B
+```
+
+Replace `SERVER-B` with the server computer name. Follow [Lab 7.3](../../modules/07-dcom-and-security.md#711-lab-73--remote-dcom) for the one-time account, registration, permissions, and firewall setup before running it. The lab uses a B-local account through `runas /netonly` on A; passwords are never placed in source or command arguments.
+
+`--remote` uses `CoCreateInstanceEx` with `CLSCTX_REMOTE_SERVER` and packet-integrity authentication. It cannot fall back to local activation or be combined with `--surrogate`, `--inproc`, or `--x86`. `--auto` still skips the Enter pause. Without `--remote`, the earlier local modes are unchanged.
+
 ## Optional: 64-bit client, 32-bit surrogate
 
 The main comparison above is complete without this exercise.

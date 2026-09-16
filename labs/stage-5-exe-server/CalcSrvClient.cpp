@@ -10,6 +10,7 @@ int wmain(int argumentCount, wchar_t* arguments[])
     bool inProcess = false;
     bool requestX86 = false;
     bool automatic = false;
+    wchar_t* remoteServer = nullptr;
     for (int index = 1; index < argumentCount; ++index)
     {
         if (wcscmp(arguments[index], L"--surrogate") == 0)
@@ -20,12 +21,24 @@ int wmain(int argumentCount, wchar_t* arguments[])
             requestX86 = true;
         else if (wcscmp(arguments[index], L"--auto") == 0)
             automatic = true;
+        else if (wcscmp(arguments[index], L"--remote") == 0)
+        {
+            if (remoteServer || index + 1 >= argumentCount ||
+                arguments[index + 1][0] == L'\0' || arguments[index + 1][0] == L'-')
+            {
+                wprintf(L"Use --remote once, followed by the server computer name.\n");
+                return 2;
+            }
+            remoteServer = arguments[++index];
+        }
         else
         {
-            wprintf(L"Usage: CalcSrvClient [--surrogate | --inproc] [--x86] [--auto]\n");
+            wprintf(L"Usage: CalcSrvClient [--surrogate | --inproc | --remote SERVER] [--x86] [--auto]\n");
             return 2;
         }
     }
+    if (remoteServer && (surrogate || inProcess || requestX86))
+    { wprintf(L"--remote selects the EXE on another machine; do not combine it with --surrogate, --inproc, or --x86.\n"); return 2; }
     if (surrogate && inProcess)
     { wprintf(L"Choose either --surrogate or --inproc.\n"); return 2; }
     if (inProcess && requestX86)
@@ -42,14 +55,44 @@ int wmain(int argumentCount, wchar_t* arguments[])
     if (FAILED(hr)) { wprintf(L"CoInitializeEx: 0x%08X\n", hr); return 1; }
 
     ICalculator* calculator = nullptr;
-    hr = CoCreateInstance(classId, nullptr, context,
-                          IID_ICalculator, reinterpret_cast<void**>(&calculator));
+    if (remoteServer)
+    {
+        hr = CoInitializeSecurity(nullptr, -1, nullptr, nullptr,
+            RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_IMP_LEVEL_IDENTIFY,
+            nullptr, EOAC_NONE, nullptr);
+        if (FAILED(hr))
+        {
+            wprintf(L"CoInitializeSecurity: 0x%08X\n", hr);
+            CoUninitialize();
+            return 1;
+        }
+
+        COSERVERINFO serverInfo{};
+        serverInfo.pwszName = remoteServer;
+        MULTI_QI requestedInterface{};
+        requestedInterface.pIID = &IID_ICalculator;
+        hr = CoCreateInstanceEx(CLSID_Calculator, nullptr,
+            CLSCTX_REMOTE_SERVER, &serverInfo, 1, &requestedInterface);
+        if (SUCCEEDED(hr)) hr = requestedInterface.hr;
+        if (SUCCEEDED(hr))
+            calculator = static_cast<ICalculator*>(requestedInterface.pItf);
+    }
+    else
+    {
+        hr = CoCreateInstance(classId, nullptr, context,
+                              IID_ICalculator, reinterpret_cast<void**>(&calculator));
+    }
     if (FAILED(hr))
     {
-        wprintf(L"CoCreateInstance failed: 0x%08X\n", hr);
-        wprintf(L"  0x80040154 = not registered   (run this lab's Setup.ps1 -Action Register)\n");
-        wprintf(L"  0x80004002 = no marshaling    (register this lab's Stage5PS.dll)\n");
-        wprintf(L"  0x80080005 = server failed to start\n");
+        wprintf(L"%ls failed: 0x%08X\n", remoteServer ? L"CoCreateInstanceEx" : L"CoCreateInstance", hr);
+        if (remoteServer)
+            wprintf(L"  Check this lab's registrations, network credentials, and server permissions/firewall.\n");
+        else
+        {
+            wprintf(L"  0x80040154 = not registered   (run this lab's Setup.ps1 -Action Register)\n");
+            wprintf(L"  0x80004002 = no marshaling    (register this lab's Stage5PS.dll)\n");
+            wprintf(L"  0x80080005 = server failed to start\n");
+        }
         CoUninitialize();
         return 1;
     }
@@ -63,7 +106,10 @@ int wmain(int argumentCount, wchar_t* arguments[])
     wprintf(L"Sub   -> hr=0x%08X  44 - 2 = %ld\n", hr, result);
     passed = passed && SUCCEEDED(hr) && result == 42;
 
-    wprintf(L"\nHost: %ls\n", host);
+    if (remoteServer)
+        wprintf(L"\nRequested server: %ls\n", remoteServer);
+    else
+        wprintf(L"\nHost: %ls\n", host);
     if (!automatic)
     {
         wprintf(L"Press Enter to release the object...\n");

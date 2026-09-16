@@ -858,33 +858,134 @@ E_ACCESSDENIED on activation
 ## 7.11 LAB 7.3 — Remote DCOM
 
 > **Requirements**
-> - **Machines:** **two** machines or VMs on the same network or domain — there is no single-box substitute for this lab.
-> - **Tools:** firewall control on B (`New-NetFirewallRule`), `Test-NetConnection`, PortQry or `rpcdump`, Event Viewer on B, `dcomcnfg` on both.
-> - **Elevation:** required on **both** machines.
-> - **Bitness:** identical on both ends.
-> - **Depends on:** Lab 7.1's x64 EXE server and this lab's `Stage5PS.dll` registered on **A and B**. Undo Lab 7.2's deliberate permission and identity failures before starting. No Stage 3 registration is required.
-> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) on B, registered with `Setup.ps1 -Action Register`; its x64 client and matching `Stage5PS.dll` on A. Register the proxy on A with x64 `regsvr32`. Build from the same IDL on both machines and use the EXE CLSID `{647E1E3B-42CF-4A82-B91E-6DCADB217D9B}`.
-> - **Caution:** isolated lab network. Opening TCP 135 plus the dynamic RPC range, and loosening authentication levels, is a lab configuration and **not** a production one. Revert every change afterwards.
-> - **Time:** ~3 h.
+> - **Machines:** two x64 Windows lab VMs on the same isolated network: **A = client**, **B = server**. Keep Windows Firewall enabled.
+> - **Build tools:** **Visual Studio on A**, with **Desktop development with C++** and a Windows SDK. No source edits are required.
+> - **Tools:** PowerShell on both machines; `dcomcnfg`, Task Manager, and Event Viewer on B.
+> - **Elevation:** administrator for setup and cleanup; ordinary PowerShell for client runs.
+> - **Depends on:** Labs 7.1 and 7.2, with their working settings restored.
+> - **Starting point:** [Stage 5 solution](../labs/stage-5-exe-server/Stage5.sln), whose client includes `--remote SERVER-B`.
+> - **Caution:** use VM snapshots for rollback. Do not disable UAC, weaken authentication, or change Windows-owned COM components. Local-account network authentication must be permitted by your lab's policy.
+> - **Time:** ~90 min, including setup.
 
-Local out-of-proc already works. This lab puts a network in the middle and shows exactly what that adds: an endpoint mapper on port 135, a dynamic port range behind it, a **second** marshaling registration on the client machine, and four permission bits instead of two.
+**Goal:** call the calculator on B from A, block TCP 135, observe the failure, and restore the connection. This lab uses one B-local account and one failure test.
 
-The method is one variable at a time — break a single thing, record the HRESULT and which machine logged it, restore it. "It fails remotely" is not a diagnosis; this lab is how you turn it into one.
+### Prepare once
 
-1. Register the Stage 5 server on machine B, and **its matching Stage5PS.dll on both A and B**. (Forgetting the client-side marshaling registration is a classic remote-DCOM failure.)
-2. From machine A, activate with `CoCreateInstanceEx` + `COSERVERINFO`.
-3. Grant **Remote Launch** and **Remote Activation** to the calling principal on B's AppID, and **Remote Access** for calls.
-4. **Break it and diagnose, one variable at a time:**
+1. **Build and register.** On **A**, open [Stage5.sln](../labs/stage-5-exe-server/Stage5.sln), select **Debug | x64**, and choose **Build > Build Solution**. The solution contains all the lab components, including the remote-capable client. Copy the Stage 5 folder, including the built `x64` directory, to **B**. Close any running lab processes before copying, and keep registered binaries in place until cleanup.
 
-| Break | Expected | How you confirm |
-|---|---|---|
-| Block TCP 135 on B's firewall | `0x800706BA RPC_S_SERVER_UNAVAILABLE` | `Test-NetConnection B -Port 135` fails |
-| Allow 135 but block the dynamic range | Activation succeeds at the endpoint mapper, then fails/hangs | ProcMon/netmon shows a connect attempt to a high port |
-| Remove Remote Activation | `0x80070005` + Event 10016 on B | Event log on **B**, not A |
-| Force `RPC_C_AUTHN_LEVEL_CONNECT` on the client | `0x80070005` + **Event 10036** on B | The hardening scenario |
-| Stop `RpcSs` on B | `0x800706BA` | `Get-Service RpcSs` |
+    All commands below run from the **Stage 5 folder containing the solution**, not its `x64` subfolder, unless stated otherwise. Record any existing Stage 5 registrations before changing them; take snapshots of A and B now.
 
-5. Use `Get-CimInstance -ComputerName B -Protocol DCOM` as the control test at each step. If it works and yours doesn't, the transport is fine.
+    **On B, elevated 64-bit PowerShell:**
+
+    ```powershell
+    .\Setup.ps1 -Action Register
+    ```
+
+    This registers the server and matching proxy/stub (plus Lab 7.1's DLL). Expect `Register completed for Stage 5 x64.` Verify B's local client still returns `42` for both calls, then press Enter.
+
+    **On A, elevated 64-bit PowerShell:**
+
+    ```powershell
+    & "$env:WINDIR\System32\regsvr32.exe" ".\x64\Stage5PS.dll"
+    ```
+
+    Expect `DllRegisterServer` to succeed. Only the proxy/stub needs registration on A, not the server.
+
+2. **Create the network caller on B.** In **elevated 64-bit PowerShell on B**, run the following commands to create `ComLabClient`. When prompted, enter and confirm a nonblank password used only for this lab. If that name belongs to an unrelated existing account, choose another name and substitute it throughout. If you already created `ComLabClient` for this lab, reuse it and skip the `/add` command; do not reset its password.
+
+    ```powershell
+    net user ComLabClient * /add
+    Add-LocalGroupMember -SID "S-1-5-32-562" -Member "$env:COMPUTERNAME\ComLabClient"
+    ```
+
+    > **SID note:** `S-1-5-32-562` is the **Security Identifier (SID)** of Windows' built-in **Distributed COM Users** group, not the user's ID. It stays the same across Windows languages, so the command works even when the group's display name is translated.
+
+    Replace **`SERVER-B` in every later command** with B's computer name, which you can find by running `hostname` on B. The last command adds the account to **Distributed COM Users**. This allows remote DCOM under the usual machine policy without making the account an administrator; component permissions are still required. If it is already a member, keep that membership unchanged.
+
+    The account exists only on B, separate from the local account on A and Lab 7.2's server account. Never put the password in commands or notes. It must be able to read and execute B's lab binaries; avoid a folder private to another user's profile.
+
+3. **Prepare A's client window.** In **ordinary PowerShell on A**, run:
+
+    ```powershell
+    runas /netonly /user:SERVER-B\ComLabClient "powershell.exe -NoProfile"
+    ```
+
+    Enter B's **ComLabClient** password directly at the prompt. In the **new window**, change to A's Stage 5 folder. Keep this window for **all client runs below**. `whoami` still shows your local account on A, but network authentication uses `SERVER-B\ComLabClient`. The password is checked when connecting, not when the window opens. This command does not change B's COM **Identity** setting.
+
+4. **Allow the lab traffic on B.** In **A's client window**, run:
+
+    ```powershell
+    Test-NetConnection -ComputerName "SERVER-B" -Port 135
+    ```
+
+    Record **SourceAddress**, A's address used to reach B. `TcpTestSucceeded` may still be false here. If B's name does not resolve, fix name resolution first. In **elevated PowerShell on B**, from its Stage 5 folder, replace the example address and run once:
+
+    ```powershell
+    $clientAddress = "192.168.56.10"
+    $serverPath = (Resolve-Path ".\x64\CalcSrv.exe").Path
+    New-NetFirewallRule -Name "COMTraining-Lab73-Endpoint" `
+        -DisplayName "COM Lab 7.3 - Endpoint mapper from A" `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 `
+        -RemoteAddress $clientAddress -Profile Any
+    New-NetFirewallRule -Name "COMTraining-Lab73-Server" `
+        -DisplayName "COM Lab 7.3 - Calculator from A" `
+        -Direction Inbound -Action Allow -Protocol TCP -Program $serverPath `
+        -RemoteAddress $clientAddress -Profile Any
+    ```
+
+    These allow A to reach the endpoint mapper and the calculator's dynamic RPC port; they do not open all high ports for every program. Keep B's elevated window open. Repeat A's connection check and require `TcpTestSucceeded : True` before continuing.
+
+### Make one remote call
+
+1. **Grant permissions on B.** Open `dcomcnfg` **as administrator** and navigate to **Component Services > Computers > My Computer > DCOM Config > Stage 5 Calculator EXE > Properties**. Confirm the **General** tab's Application ID is `{A57CC9FD-4A41-4579-9D75-97ECC20C504B}`. Open **Security** and record the original Use Default/Customize choices and permissions.
+
+    Under **Launch and Activation Permissions > Customize > Edit**, click **Add**, enter **`SERVER-B\ComLabClient`**, and choose **Check Names > OK**. In **Locations**, select B itself if needed. Select that account and check **Allow: Remote Launch** and **Allow: Remote Activation**. Click **OK**.
+
+    Under **Access Permissions > Customize > Edit**, add the same account and check **Allow: Remote Access**. Click **OK**, then **Apply > OK** in Properties. Keep existing entries/local rights unchanged; leave **Configuration Permissions** and **Identity** alone. Previous Lab 7.2 Deny experiments must already be undone. Close all lab clients and let B's `CalcSrv.exe` exit.
+
+2. **Run on A and observe on B.** In **A's `/netonly` client window**, run:
+
+    ```powershell
+    .\x64\CalcSrvClient.exe --remote SERVER-B
+    ```
+
+    Expect both `Add` and `Sub` to return `42` with `hr=0x00000000`. Leave the client at its Enter prompt. In **Task Manager > Details on B**, find the lab's `CalcSrv.exe`. Press Enter **on A** to release the object. The `--remote` option uses `CoCreateInstanceEx` and packet-integrity authentication; it cannot fall back to a local calculator.
+
+    **Baseline gate:** if this fails, record the HRESULT and inspect **Event Viewer > Windows Logs > System > DistributedCOM on B** for a matching event. B's machine-wide DCOM limits and network-logon policy still apply even with component grants. Resolve that specific prerequisite with the VM administrator; do not disable UAC, grant Everyone, or proceed to deliberate failure while the baseline is broken.
+
+### Block, observe, restore
+
+1. **Block TCP 135 on B.** Close the client on A. In **B's elevated PowerShell window**, reuse `$clientAddress` from preparation:
+
+    ```powershell
+    New-NetFirewallRule -Name "COMTraining-Lab73-BlockTCP135" `
+        -DisplayName "COM Training Lab 7.3 - Block TCP 135 from A" `
+        -Direction Inbound -Action Block -Protocol TCP -LocalPort 135 `
+        -RemoteAddress $clientAddress -Profile Any
+    ```
+
+2. **Observe on A.** In **A's client window**, run:
+
+    ```powershell
+    Test-NetConnection -ComputerName "SERVER-B" -Port 135
+    .\x64\CalcSrvClient.exe --remote SERVER-B
+    ```
+
+    Expect `TcpTestSucceeded : False` and an activation failure, commonly `0x800706BA` (RPC server unavailable). Record the actual HRESULT. The block affects new connections, not an already-held object. Cached RPC endpoints can also affect the client result; the fresh TCP check is the direct evidence that port 135 is blocked. Do not stop `RpcSs` or other Windows services.
+
+3. **Restore on B**, from elevated PowerShell:
+
+    ```powershell
+    Remove-NetFirewallRule -Name "COMTraining-Lab73-BlockTCP135"
+    ```
+
+    Repeat both commands on A. Require `TcpTestSucceeded : True` and both calculator results equal to `42`. Press Enter to release the object.
+
+### Clean up
+
+When finished, save your notes outside the VMs, close the client and `/netonly` window, and restore both preparation snapshots. This removes the lab's changes and restores the previous configuration.
+
+**Deliverable:** record the successful call, the blocked TCP check and client result, and the successful recovery. Explain why A needs the proxy/stub and why B grants permissions to `ComLabClient`, not the local account on A.
 
 ---
 
@@ -912,40 +1013,57 @@ That last group is the one that matters most in security reviews: **an out-of-pr
 
 ## 7.13 The DCOM support triage flow
 
-```
+Record the failing API or method, exact HRESULT, time, CLSID/AppID, target machine, and caller identity. Each branch below lists checks, not a diagnosis from the HRESULT alone.
+
+```text
 Activation or call failure in an out-of-proc / remote scenario
 │
-├─ Get the exact HRESULT.  !error / certutil -error
+├─ Decode the HRESULT: WinDbg !error <HRESULT> or certutil -error <HRESULT>
 │
 ├─ 0x80040154 REGDB_E_CLASSNOTREG
 │     → Module 2 flow: bitness, hive, ProcMon
 │
 ├─ 0x80070005 E_ACCESSDENIED
-│     ├─ Event 10016 on the SERVER machine?
-│     │    → note the right (Launch vs Activation, Local vs Remote) and the principal
-│     │    → check MachineLaunchRestriction (Limits) FIRST, then the AppID, then Default
-│     ├─ Event 10036/10037?  → authentication-level hardening; raise the client's level
-│     ├─ Integrity level mismatch? (medium client → high server)
-│     └─ NTFS ACL on the server binary, or on the CLSID/AppID registry key
+│     ├─ Correlated Event 10016 on the server?
+│     │    → Match time, CLSID/AppID, caller and denied right; unrelated events may be benign.
+│     ├─ Launch/Activation: MachineLaunchRestriction AND AppID LaunchPermission
+│     │    → Use DefaultLaunchPermission only if the AppID value is absent.
+│     ├─ Call access: MachineAccessRestriction AND the server's effective access policy
+│     │    → Check CoInitializeSecurity; if using registry policy, check AppID AccessPermission
+│     │      or DefaultAccessPermission when the AppID value is absent.
+│     ├─ Hardening: Event 10036 on server; 10037/10038 on client
+│     │    → Check updates and effective activation level: PKT_INTEGRITY or higher.
+│     │      Updated Windows clients auto-raise non-anonymous activation requests.
+│     └─ Verify actual caller credentials/token, not just elevation; check file/registry
+│          access denials with ProcMon. A method can also return its own E_ACCESSDENIED.
 │
 ├─ 0x80080005 CO_E_SERVER_EXEC_FAILURE
-│     ├─ Can you launch the EXE manually as the RunAs account?
-│     ├─ RunAs account valid?  Password changed?  (LSA secret SCM:{appid})
-│     ├─ Server crashing at startup?  → Application event log, WER, procdump -e
+│     ├─ EXE path, dependencies and startup environment correct?
+│     │    → Manual launch is a preliminary check, not a test of COM's RunAs activation.
+│     ├─ RunAs account enabled and stored password current? Has "Log on as a batch job"?
+│     ├─ Server crashing at startup? → Application event log, WER crash dump;
+│     │    arrange crash capture on the next reproduction if no dump exists.
 │     ├─ Server failing to CoRegisterClassObject within the timeout?
-│     └─ Session 0 / no interactive user for "Interactive User"
+│     └─ "Interactive User": is the required logged-on user/session available?
 │
 ├─ 0x800706BA RPC_S_SERVER_UNAVAILABLE
-│     ├─ Test-NetConnection <host> -Port 135
-│     ├─ Dynamic port range open?
-│     ├─ RpcSs / DcomLaunch running?
-│     └─ Name resolution correct?  (short name vs FQDN vs IP changes auth!)
+│     ├─ Remote: Test-NetConnection <host> -Port 135
+│     │    → Tests TCP 135 only; also verify the actual server RPC endpoint is reachable.
+│     ├─ Server listening? Check routing and scoped firewall rules for that endpoint.
+│     ├─ RpcSs / DcomLaunch running? Do not stop these services as a test.
+│     └─ Correct server name/address? Name choice can affect Kerberos/NTLM authentication.
 │
 ├─ 0x80010108 RPC_E_DISCONNECTED
-│     → the server died. Get a dump of the SERVER, not the client.
+│     ├─ Object disconnected: server exit is only one possible cause.
+│     ├─ If still running, inspect object/apartment lifetime and client/server stacks.
+│     └─ If exited, check exit/crash evidence; use an existing crash dump or arrange
+│          capture on reproduction if needed.
 │
 └─ Hang, not an error
-      → dumps of BOTH processes; look for combase!...SendReceive (Module 3)
+    ├─ Exclude intentional waits first, including the lab client's Enter prompt.
+    └─ Capture dumps of BOTH live processes while hung. Follow the waiting call;
+         check locks, STA message pumping and callbacks (Module 3).
+         A SendReceive frame shows a wait, not its root cause.
 ```
 
 Print this. It is the module's deliverable.
