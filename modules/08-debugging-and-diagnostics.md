@@ -48,6 +48,8 @@ For crashes involving suspected memory corruption or invalid COM/handle use, **A
 
 Capture evidence while the symptom is present, or arrange capture for the next reproduction. The following sections explain the tools; use them to answer a specific question, not as mandatory steps in a sequence.
 
+**Collect safely:** agree on capture impact and disk space before running diagnostics in production; dump capture can pause a process. Dumps and traces may contain credentials or customer data: use restricted storage, approved secure sharing, and the agreed retention policy. Stop traces and restore any verifier/page-heap or crash-capture settings you changed when finished.
+
 ---
 
 ## 8.2 HRESULT decoding
@@ -87,7 +89,7 @@ Result is NAME NOT FOUND                   -> Highlight
 Result is ACCESS DENIED                    -> Highlight
 ```
 
-Also add `Process Name is <client.exe>` to cut noise.
+Use these filters for registration lookups. Keep **Drop Filtered Events** off so you can change the view later. Remove the CLSID and registry-operation filters to inspect file loads; include the server host for out-of-proc activation, not just the client.
 
 ### What a healthy activation looks like
 
@@ -103,30 +105,38 @@ Capture this once from a *working* system (Lab 2.1 asked you to). Every failure 
 
 ### Reading failures
 
-| ProcMon result | Meaning | Not |
-|---|---|---|
-| `NAME NOT FOUND` on the CLSID key | Not registered in the hive/bitness this process sees | a permission problem |
-| `ACCESS DENIED` on the CLSID key | Registered, but this token can't read it | a deployment problem |
-| `NAME NOT FOUND` on the DLL path | Registration points at a missing file | |
-| `ACCESS DENIED` on the DLL file | NTFS ACL | |
-| `NAME NOT FOUND` on a *different* DLL right after Load Image | **Missing dependency** → `0x8007007E` | |
-| Probe under `Wow6432Node` | The client is 32-bit | |
+Follow the lookup sequence through to the failed operation. Windows often probes optional keys and several search paths before succeeding; a single unsuccessful probe is not a diagnosis.
 
-That last one is a free bitness check: **if ProcMon shows `Wow6432Node` in the path, the client is 32-bit.** No other tool needed.
+| ProcMon result | What it establishes | Check next |
+|---|---|---|
+| `NAME NOT FOUND` on a CLSID key | That lookup did not find the key | Did another applicable registry lookup succeed? |
+| `ACCESS DENIED` on a CLSID key | That operation was denied | Process token and effective key permissions |
+| `NAME NOT FOUND` on a DLL path | The file was absent at that path | Was it found at another path? |
+| `ACCESS DENIED` on a DLL file | That file access was denied | Token, requested access, and file permissions |
+| Repeated unresolved dependency probes | Possible missing dependency | Does the load ultimately fail? |
+| Probe under `Wow6432Node` | Access to that registry path | Verify the process's bitness separately |
+
+The registry path alone does not prove process bitness: a process can explicitly access another registry view. Confirm its architecture in Process Explorer.
 
 ### Dependency failures
 
-When `Load Image` on your DLL is followed by `NAME NOT FOUND` on `MSVCP140.dll` or similar, you have `ERROR_MOD_NOT_FOUND` (`0x8007007E`). Confirm with:
+A failed load with `ERROR_MOD_NOT_FOUND` (`0x8007007E`) can mean the target DLL or a dependency is missing. Correlate unresolved probes, such as for `MSVCP140.dll`, with that failure. List static dependencies with:
 
 ```powershell
 dumpbin /dependents C:\Components\Calc.dll
 ```
 
-or the Dependencies tool (the modern Dependency Walker replacement).
+or the Dependencies tool. Neither list alone proves runtime resolution; use the trace to see which paths were actually tried and loaded.
 
 ---
 
 ## 8.4 WinDbg for COM
+
+### Choose the process
+
+- **In-process DLL:** capture the process hosting the DLL, normally the client.
+- **EXE server or surrogate:** confirm the PID, executable path, user, session, and bitness in Process Explorer. For `dllhost.exe`, use **Find > Find Handle or DLL** to locate the component DLL, then confirm its full loaded path and host PID.
+- **Cross-process hang:** capture the client and server close together on each sampling round, including both machines for remote calls. A server crash needs the server's crash dump.
 
 ### Setup
 
@@ -136,16 +146,24 @@ or the Dependencies tool (the modern Dependency Walker replacement).
 .reload /f
 ```
 
-Get a dump:
+Keep the exact application binaries and matching **PDB (Program Database)** symbol files; replace `C:\MySymbols` with their folder. Microsoft's symbol server supplies Windows symbols, not your own application's PDBs. Check `lmvm <module>` for image and symbol status before trusting source lines or object layouts.
+
+### Capture a usable dump
+
+A small minidump may omit heap and object memory. When that memory is needed, use a full **user-mode** dump (`-ma`) if collection policy permits. This captures process memory, not the whole machine. Prepare the output folder and substitute the actual PID or EXE name:
 
 ```powershell
 procdump -ma -o <pid> C:\dumps\out.dmp          # full dump, now
-procdump -ma -e -x C:\dumps app.exe             # on unhandled exception
+procdump -ma -e -w app.exe C:\dumps            # on unhandled exception
 procdump -ma -h app.exe C:\dumps\hang.dmp       # on window hang
 procdump -ma -s 5 -n 3 <pid> C:\dumps\seq.dmp   # 3 dumps, 5s apart - great for leaks/hangs
 ```
 
-For a **hang**, take **three dumps 10 seconds apart**. Stacks that are identical across all three are genuinely stuck; stacks that move are just slow. This distinction saves enormous time.
+For a startup crash, start the `-w` command before normal COM activation; it waits for the EXE rather than launching it manually. Avoid name-based capture when multiple processes share that name. If the crash precedes attachment, arrange per-application [Windows Error Reporting (WER) LocalDumps](https://learn.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps) with an administrator before reproducing; applications with custom crash reporting may need their own capture mechanism.
+
+The [ProcDump](https://learn.microsoft.com/en-us/sysinternals/downloads/procdump) `-h` trigger detects an unresponsive window, not every COM hang. Use PID-based timed captures for waits without a hung window.
+
+For a **hang**, compare three dumps about five seconds apart. Repeated stacks suggest a persistent wait or recurring work, not necessarily a deadlock; changing stacks do not guarantee useful progress. Follow wait dependencies and correlate with CPU usage and application logs. Exclude intentional waits, such as the lab client's Enter prompt.
 
 ### Command reference for COM work
 
@@ -154,7 +172,7 @@ For a **hang**, take **three dumps 10 seconds apart**. Stacks that are identical
 | `!error <hr>` | Decode an HRESULT |
 | `~*kb` | All thread stacks — the first command for any hang |
 | `!uniqstack` | Deduplicated stacks; much faster to scan in a 200-thread process |
-| `!runaway` | CPU time per thread — distinguishes a hang (all idle) from a spin |
+| `!runaway` | CPU time per thread; compare across dumps to identify CPU-consuming threads |
 | `dps <ptr> L8` | **Dump a vtable** — identifies the real implementation behind an interface pointer |
 | `!cs -l` | Locked critical sections and their owners |
 | `!locks` | Same, with wait chains |
@@ -214,7 +232,7 @@ combase!ThreadInvoke
 RPCRT4!LrpcIoComplete
 ```
 
-**STA thread correctly pumping while waiting:**
+**STA thread waiting inside COM's modal loop:**
 ```
 ntdll!NtWaitForMultipleObjects
 combase!CCliModalLoop::BlockFn
@@ -222,14 +240,14 @@ combase!ModalLoop
 combase!ThreadSendReceive
 ```
 
-**STA thread incorrectly blocked (the deadlock signature):**
+**STA thread in a non-pumping wait (investigate the dependency):**
 ```
 ntdll!NtWaitForSingleObject
 KERNELBASE!WaitForSingleObjectEx
 <YourApp>!SomeFunction              <- no ModalLoop, no CoWaitForMultipleHandles
 ```
 
-> **Memorize the discrimination:** `CCliModalLoop::BlockFn` in an STA's stack = pumping correctly. `WaitForSingleObjectEx` directly under app code in an STA = the deadlock from Module 3.
+> **Stacks are clues:** a COM modal loop can dispatch incoming calls but does not rule out deadlock. An STA's non-pumping wait is a deadlock risk when completion depends on calls or messages to that STA. Establish that dependency rather than diagnosing from one frame; exact COM function names vary by Windows build.
 
 ### Cross-process hang analysis
 
@@ -320,14 +338,14 @@ Now `BSTR` leaks show up immediately in `!heap -stat`. Remember this — it turn
 
 **Symptom:** private bytes grow monotonically; the process never releases memory even at idle.
 
-### Step 1 — Confirm it's a COM leak
+### Step 1 — Check what keeps growing
 
 ```
 0:000> !heap -s
 0:000> !heap -stat -h 0            ; all heaps, allocation stats by size
 ```
 
-Look for one size bucket dominating and growing across sequential dumps. A COM object leak usually shows a fixed allocation size repeating.
+Look for size buckets that keep growing across the same repeated workload. Repeated allocation sizes are a clue, not proof of a COM leak; identify the allocations and their owners before drawing that conclusion.
 
 Also check:
 ```
@@ -335,7 +353,7 @@ Also check:
 0:000> !handle 0 0                 ; handle count growing?
 ```
 
-A DLL that never unloads is direct evidence that `DllCanUnloadNow` never returned `S_OK` — i.e. live objects or locks (Module 2).
+A DLL remaining loaded does not prove leaked COM references. Unloading may be deferred or never requested, and other loader references can keep the DLL mapped. Correlate object/server-lock counts with the host's unload behavior (Module 2); `DllCanUnloadNow` returning `S_OK` only means the DLL is eligible for unloading.
 
 ### Step 2 — Find the allocation site
 
@@ -389,6 +407,8 @@ Conditional variant — break only when the count crosses a threshold:
 
 ## 8.8 The complete triage flowchart
 
+These branches suggest checks, not diagnoses from a single error or stack. For DCOM permissions, transport, and disconnection details, use [Module 7's support triage flow](07-dcom-and-security.md#713-the-dcom-support-triage-flow).
+
 ```
 COM PROBLEM
 │
@@ -396,10 +416,10 @@ COM PROBLEM
 │   │
 │   ├── At ACTIVATION (CoCreateInstance)
 │   │   ├── 0x80040154  → Module 2: bitness → hive → ProcMon (NAME NOT FOUND vs ACCESS DENIED)
-│   │   ├── 0x8007007E  → missing dependency; ProcMon Load Image + dumpbin /dependents
-│   │   ├── 0x80070005  → Module 7: Event 10016 → Limits → AppID → Default → integrity level
+│   │   ├── 0x8007007E  → target DLL or dependency missing; correlate ProcMon with the failed load
+│   │   ├── 0x80070005  → Module 7 §7.13: correlated events, effective permissions, authentication
 │   │   ├── 0x80080005  → Module 7: RunAs account, server crash at startup, session 0
-│   │   ├── 0x800706BA  → Module 7: network, port 135 + dynamic range, RpcSs
+│   │   ├── 0x800706BA  → Module 7 §7.13: server availability, TCP 135 and actual RPC endpoint
 │   │   └── 0x800401F0  → CoInitializeEx missing on this thread
 │   │
 │   ├── At QUERYINTERFACE
@@ -409,16 +429,16 @@ COM PROBLEM
 │   │
 │   ├── At CALL TIME
 │   │   ├── 0x8001010E  → Module 3: wrong apartment, raw pointer shared
-│   │   ├── 0x80010108  → server died; dump the SERVER
+│   │   ├── 0x80010108  → object disconnected; check server exit or object/apartment shutdown
 │   │   ├── 0x800706F7  → Module 4: mismatched IDL builds; get all three version numbers
 │   │   ├── 0x80020009  → Module 5: open EXCEPINFO, the real error is inside
-│   │   └── 0x80070005  → Module 7: Access (not Launch) permission
+│   │   └── 0x80070005  → Module 7: effective call-access policy; also check application authorization
 │   │
 │   └── Intermittent / under load only
 │       └── Module 3: threading. ThreadingModel + client apartment + shared raw pointers
 │
 ├── Does it HANG?
-│   ├── 3 dumps, 10s apart. Same stacks = truly stuck.
+│   ├── Compare repeated dumps (§8.4); confirm wait dependencies and useful progress.
 │   ├── ~*kb → look for combase!...SendReceive and a non-pumping STA
 │   ├── !cs -l / !locks → lock held across an outbound call?
 │   ├── Out-of-proc? Dump BOTH processes.
