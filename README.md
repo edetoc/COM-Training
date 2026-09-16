@@ -1,7 +1,7 @@
 # COM Ramp-Up Training Plan
 
 > Audience: Developer **and** Support/Escalation Engineer, starting from beginner.
-> Format: 9 progressive modules. Each has **Concepts → Lab → Checkpoint questions → Support angle**.
+> Format: 9 progressive modules. Modules 0-7 combine concepts, labs, checkpoints, and support guidance; Module 8 is a diagnostics reference.
 > Suggested pace: one module per week, but go strictly in order — COM is unforgiving of skipped fundamentals.
 
 ## Modules
@@ -16,7 +16,7 @@
 | 5 | [Automation, `IDispatch`, and scripting](modules/05-automation-and-idispatch.md) | Dual interfaces, `VARIANT`/`BSTR`/`SAFEARRAY`, events, enumerators, `IErrorInfo` |
 | 6 | [Choosing COM tools: ATL, WRL, WIL, C++/WinRT, .NET](modules/06-frameworks-and-interop.md) | What each tool provides, how they differ, choosing by task, managed interop |
 | 7 | [DCOM, security, and out-of-proc](modules/07-dcom-and-security.md) | AppID, session 0, `CoInitializeSecurity`, UAC, Event 10016, hardening |
-| 8 | [Debugging, diagnostics, and capstone](modules/08-debugging-and-capstone.md) | ProcMon, WinDbg, ETW, AppVerifier, triage flowchart, capstone project |
+| 8 | [Debugging and diagnostics](modules/08-debugging-and-diagnostics.md) | Symptom-based evidence collection, ProcMon, WinDbg, ETW, AppVerifier, triage flowchart |
 
 ### Appendices
 
@@ -396,17 +396,6 @@ Implement a connection point, subscribe a sink, and confirm callbacks. Then remo
 - **Process Monitor** patterns for activation failures (the exact key probe order).
 - **OleView.NET** for: enumerating CLSIDs by server, viewing proxy/stub registration, checking a component's `ThreadingModel` and AppID, and diffing registration between a working and a broken machine.
 
-**Capstone project**
-
-Build a small but complete component and then support it:
-
-1. `IDocumentStore` — an out-of-proc COM server (EXE) with a dual interface, a connection-point event for change notifications, an `IEnumVARIANT` enumerator, and rich `IErrorInfo` errors.
-2. Clients: C++ (raw + ATL), C# (both classic interop and `ComWrappers`), and PowerShell.
-3. Ship it three ways: `regsvr32`-registered, reg-free with manifests, and via a DLL surrogate.
-4. **Then write the support runbook**: for each of the 12 HRESULTs in the Module 2 table, document how it would manifest for *this* component and the exact diagnostic steps.
-
-That runbook is the deliverable that proves you've made it.
-
 ---
 
 ## Reference shelf
@@ -440,7 +429,7 @@ That runbook is the deliverable that proves you've made it.
 | 5 | [Automation & IDispatch](modules/05-automation-and-idispatch.md) | ☐ | ☐ | ☐ | ☐ |
 | 6 | [Choosing COM tools and interop](modules/06-frameworks-and-interop.md) | ☐ | ☐ | ☐ | ☐ |
 | 7 | [DCOM & security](modules/07-dcom-and-security.md) | ☐ | ☐ | ☐ | ☐ |
-| 8 | [Debugging & capstone](modules/08-debugging-and-capstone.md) | ☐ | ☐ | ☐ | ☐ |
+| 8 | [Debugging & diagnostics](modules/08-debugging-and-diagnostics.md) | ☐ | — | ☐ | ☐ |
 | A | [Monikers & persistence](modules/appendix-a-monikers-and-persistence.md) | ☐ | — | ☐ | ☐ |
 | B | [COM+ & WinRT](modules/appendix-b-com-plus-and-winrt.md) | ☐ | — | ☐ | ☐ |
 

@@ -1122,4 +1122,4 @@ Print this. It is the module's deliverable.
 
 ---
 
-**Next: [Module 8 — Debugging, diagnostics, and the capstone](08-debugging-and-capstone.md)**
+**Next: [Module 8 — Debugging and diagnostics](08-debugging-and-diagnostics.md)**
