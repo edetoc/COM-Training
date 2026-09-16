@@ -752,27 +752,92 @@ A **surrogate** is a process that hosts a COM DLL on a client's behalf. This sol
 ## 7.10 LAB 7.2 — Permissions and Event 10016
 
 > **Requirements**
-> - **Tools:** `dcomcnfg` (Component Services), Event Viewer / `Get-WinEvent`, and a test account for the `RunAs` steps.
-> - **Elevation:** required throughout.
+> - **Environment:** **a Windows VM is strongly recommended**, with a snapshot/checkpoint taken before the permission experiments. A dedicated disposable test machine is the alternative; do not use your everyday development machine.
+> - **Tools:** `dcomcnfg` (Component Services), Event Viewer / `Get-WinEvent`, and disposable test accounts for the `RunAs` steps.
+> - **Elevation:** required for registration and configuration changes. Run the client from ordinary PowerShell as the user whose access you are testing.
 > - **Bitness:** `dcomcnfg` shows the **64-bit** DCOM config. For a 32-bit AppID run `mmc comexp.msc /32` — a component that "isn't in the list" is usually this.
-> - **Depends on:** Lab 7.1's x64 setup, which remains registered after the hosting comparison.
-> - **Starting point:** [`labs/stage-5-exe-server/`](../labs/stage-5-exe-server/) — select **Stage 5 Calculator EXE**, AppID `{A57CC9FD-4A41-4579-9D75-97ECC20C504B}`, in `dcomcnfg`. Export that key before you touch it. The EXE reads its AppID policy through `CoInitializeSecurity` with `EOAC_APPID`; close existing clients and let it exit between tests so a new process reads the changed policy.
-> - **Caution:** **VM or dedicated test machine only.** You are editing machine-wide DCOM ACLs. Export `HKLM\SOFTWARE\Classes\AppID\{your-appid}` before you start, and never "fix" a Microsoft-owned AppID this way — that is the single most common bad advice in COM support, and it is what §7.7 tells you not to do.
+> - **Depends on:** Lab 7.1's hosting and marshaling concepts. Set up or reuse its x64 components using the preparation steps below.
+> - **Starting point:** [labs/stage-5-exe-server/](../labs/stage-5-exe-server/) — the Stage 5 solution.
+> - **Caution:** deliberately changing DCOM permissions and server identity can break activation. Change only the training AppID, not machine-wide DCOM limits or a Microsoft-owned AppID. A registry export is useful for reference, but is not a substitute for the VM snapshot: it does not preserve test accounts or stored `RunAs` credentials.
 > - **Time:** ~2 h.
 
 Launch and Access permissions are configured in different places, checked at different times, and confused constantly — including in a great deal of published advice.
 
 Here you break each one deliberately so you learn to tell them apart **from the symptom alone**, before reading any log. Then you find the Event 10016 your own machine just generated and map every field back to what you changed.
 
-1. In `dcomcnfg`, find your Calculator AppID → Properties → Security → **Launch and Activation Permissions** → Customize → Edit. **Remove your user account.**
-2. Run the client. Expect `E_ACCESSDENIED` (`0x80070005`).
-3. Open Event Viewer → Windows Logs → System, filter Source = `DistributedCOM`. Find **your** Event 10016. Read every field and map it to what you changed.
-4. Now the discrimination drill — cause each of these and record how they differ:
-   - Remove **Launch** permission → fails at activation, before the process starts.
-   - Grant Launch but remove **Access** permission → the server *starts*, then the first call fails.
-   - Set `RunAs` to a nonexistent account → `0x80080005 CO_E_SERVER_EXEC_FAILURE`.
-   - Set `RunAs` to a valid account with a wrong stored password → also `0x80080005`, but the Application log shows a logon failure (Event 4625 in Security).
-5. Fix it **correctly**: grant *Local Activation* to your specific account — not "Everyone", not "Full Control".
+### Prepare the VM
+
+1. **Set up Stage 5 inside the VM.** If Lab 7.1 already works in this VM, with its proxy registered and any experimental `Sleep` removed, continue to step 2. Otherwise, copy the entire Stage 5 folder into the VM if it is not already there, then complete the following inside the VM:
+
+    Close any lab clients and let the server exit. Remove any experimental `Sleep` from [CalcSrv.cpp](../labs/stage-5-exe-server/CalcSrv.cpp), open [Stage5.sln](../labs/stage-5-exe-server/Stage5.sln) in Visual Studio, and build **Debug | x64**.
+
+    Open **elevated 64-bit PowerShell**, change to the Stage 5 folder containing the solution and setup script (**not** its `x64` subfolder), and run:
+
+    ```powershell
+    .\Setup.ps1 -Action Register
+    ```
+
+    This registers the EXE server and its matching proxy/stub, along with the DLL used in Lab 7.1. Registration on your host machine does not carry over into the VM. Keep the binaries at these paths; step 2 verifies the setup with a normal client run.
+2. **Create the server test account and check the baseline.** Keep your current VM sign-in account as the **client user**. Create a separate local account, such as `ComLabRunAs`, for the **server identity** experiments. Inside the VM, open **PowerShell as administrator** and run:
+
+    ```powershell
+    net user ComLabRunAs * /add
+    ```
+
+    Choose an unused account name. The `*` prompts you to enter and confirm a password without displaying it; use a nonblank, lab-only password that meets the VM's password policy. Do not put it in the command or your notes. Leave this account as a standard user; do not add it to Administrators or use a production/domain service account. Confirm creation with `net user ComLabRunAs`.
+
+    This account is used in **Permission experiments, step 4**, to run the server under a different account while the client stays under your original account. There you will select **Identity > This user** in `dcomcnfg` and enter `<VM-name>\ComLabRunAs` with its **correct password** (`hostname` shows the VM name). **Do not change the server identity yet.** Make sure this account can read and execute the lab's binaries; a folder restricted to your own user profile can prevent the server from starting under another account.
+
+    Close the elevated window. Open **ordinary PowerShell** in the VM's [labs/stage-5-exe-server](../labs/stage-5-exe-server/) folder, not its `x64` subfolder, and run:
+
+    ```powershell
+    whoami
+    .\x64\CalcSrvClient.exe
+    ```
+
+    Record the account printed by `whoami`: that is the **caller** whose Launch/Activation and Access permissions you will test, not `ComLabRunAs`. Both calculator calls should return `42` with `hr=0x00000000`. Press Enter and let the server exit. If either call fails, fix the Lab 7.1 setup before taking the snapshot.
+3. Take a VM **snapshot/checkpoint** named **Before Lab 7.2**. This is the working state you will restore afterward. Also record **Stage 5 Calculator EXE's configuration before the experiments**: its **AppID registry values**, **Launch/Activation and Access permissions**, and **Identity** setting (which account runs the server). The following steps capture these settings for comparison with your later changes:
+
+    **Identify the component and its AppID.** Inside the VM, open `dcomcnfg` as administrator, then navigate to **Component Services > Computers > My Computer > DCOM Config**. Right-click **Stage 5 Calculator EXE > Properties**. On the **General** tab, record the **Application ID**; for this lab it should be `{A57CC9FD-4A41-4579-9D75-97ECC20C504B}`. If it differs, check that you selected the EXE component from the current Stage 5 setup, not the surrogate or an older sample, before continuing.
+
+    **Take screenshots for your lab notes.** Keep the **Stage 5 Calculator EXE Properties** dialog open and capture these three tabs: **General** (the Application ID), **Security** (the Use Default/Customize choices for Launch and Activation Permissions and Access Permissions), and **Identity** (the selected option and the account name if This user is selected). Save the screenshots in your lab notes folder. You do not need screenshots of the other tabs for this exercise.
+
+    **Capture customized Launch/Activation or Access permissions, if present.** For each of those two Security sections already set to **Customize**, click **Edit**. Select each listed user/group in turn and take a screenshot showing its name and Allow/Deny checkboxes; one screenshot of the Security tab alone does not capture these details. Close each permission dialog with **Cancel**. If both sections use **Use Default**, the Security-tab screenshot is sufficient: skip the permission-detail captures and leave both settings unchanged. Do not record passwords or change any settings, and close Properties with **Cancel** when finished.
+
+    **Leave Configuration Permissions unchanged**, even if that third section is set to **Customize**. It controls access to the component's registry configuration, not the Launch/Activation or call Access permissions tested here. You do not need to open its **Edit** dialog for this exercise.
+
+    **Export the matching registry settings.** Open **Registry Editor** (`regedit`) as administrator. If the address bar is hidden, open the **View** menu and check **Address Bar**. Navigate to `HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AppID\{the Application ID you recorded}`. For this lab, the full path is:
+
+    ```text
+    HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AppID\{A57CC9FD-4A41-4579-9D75-97ECC20C504B}
+    ```
+
+    With that key selected, choose **File > Export**. Under **Export range**, select **Selected branch**, confirm it shows this exact AppID key (not the whole registry), and save it as `Stage5-AppID-before.reg` in your lab notes folder. This copies the key's current values to a file; it does not change the registration. If the key is missing, check that Stage 5 was registered inside this VM before continuing. The `.reg` export does **not** include stored `RunAs` passwords; use the VM snapshot for full rollback.
+
+For a dedicated test machine, use the same working baseline and record every change for manual reversal instead of taking a VM snapshot.
+
+### Permission experiments
+
+Use **Stage 5 Calculator EXE**, identified and backed up in preparation step 3. Before each test, close existing lab clients and let `CalcSrv.exe` exit. The EXE reads its AppID policy once at startup through `CoInitializeSecurity` with `EOAC_APPID`, so a fresh process is needed to test changed settings.
+
+1. Open `dcomcnfg` as administrator and navigate to **Component Services > Computers > My Computer > DCOM Config**. Right-click **Stage 5 Calculator EXE**, choose **Properties**, then open **Security**. Under **Launch and Activation Permissions**, select **Customize**, then click **Edit**. These are the component's settings, not the machine-wide settings under My Computer > Properties.
+
+    **Your caller account may not appear in the list.** Entries such as **INTERACTIVE** can grant rights to accounts without listing each one individually. Removing an individual Allow entry would not override those group grants. Leave **SYSTEM**, **Administrators**, **INTERACTIVE**, and other existing entries intact.
+
+    Click **Add**, enter **the full caller account printed by `whoami` in Prepare the VM, step 2** (for example, `VM0\YourUser`), then **Check Names > OK**. Use that caller, not `ComLabRunAs`. Select its new entry and check **Deny** for **Local Activation** only; do not select any other Deny boxes. If the caller already has an individual entry, record its existing settings and apply this change to that entry instead. Click **OK** to close the permissions dialog and **Apply** in the component's Properties dialog. This temporary, component-specific denial overrides group Allow grants for Local Activation; it is deliberate fault injection in the isolated lab, not a recommended production setting.
+2. Run `.\x64\CalcSrvClient.exe` from ordinary PowerShell as that same caller. Expect `CoCreateInstance failed: 0x80070005` (`E_ACCESSDENIED`). If activation succeeds, verify that the Deny is saved on **Stage 5 Calculator EXE**, names the account shown by `whoami` in that terminal, and selects **Local Activation**. Do not change machine-wide DCOM limits.
+3. Open Event Viewer → Windows Logs → System, filter Source = `DistributedCOM`. Look for an **Event 10016 from this test**, matching its time, EXE AppID, caller, and denied right. Read every field and map it to what you changed. If no matching event appears, record that result; an unrelated 10016 does not explain this failure.
+4. **Restore the working baseline before the discrimination drill.** Reopen the component's Launch and Activation permissions editor and remove the caller permission entry you added for this test, or restore its original rights if the entry already existed. Restore **Use Default** versus **Customize** as recorded during VM preparation. Close the lab clients, let `CalcSrv.exe` exit, then run `.\x64\CalcSrvClient.exe` normally and confirm both calls return `42` with `hr=0x00000000`. Otherwise, the earlier activation failure could hide the next problem.
+
+    Now compare the launch/activation failure from steps 1–3 with an **Access-permission failure**, then verify that **the server can run under a different account from the caller**. Change one setting at a time. After each scenario below, record the result, undo the change, let the server exit, and confirm a fresh client succeeds before trying the next:
+
+    - With Launch and Activation permissions restored, open **Access Permissions > Customize > Edit**. Add the same caller if absent, select its entry, and check **Deny** for **Local Access** only. Leave other entries unchanged, save, and test with a fresh server process. Expect **`0x80070005 E_ACCESSDENIED`**. The client may print `CoCreateInstance failed: 0x80070005`: the server can start, but COM must also obtain the requested interface, and access checks can fail during that operation. If activation succeeds and a method call is denied instead, its `Add` or `Sub` result line reports `hr=0x80070005`. This is the same HRESULT as a launch/activation denial; the error code alone does not identify which permission failed. Afterwards, remove the newly added caller permission entry or restore its original rights, and restore **Use Default** versus **Customize** for Access Permissions.
+    - **Run the server as `ComLabRunAs`.** Keep Launch/Activation and Access permissions at their restored baseline. Close existing lab clients and let `CalcSrv.exe` exit. In `dcomcnfg`, navigate to **Component Services > Computers > My Computer > DCOM Config**, right-click **Stage 5 Calculator EXE**, choose **Properties**, and open the **Identity** tab to configure `RunAs`. Select **This user**, enter `<VM-name>\ComLabRunAs` (created in **Prepare the VM, step 2**), and enter its **correct password** in both password boxes. Click **Apply**.
+
+        From ordinary PowerShell as your original caller, run `whoami`, then `.\x64\CalcSrvClient.exe`. Both calls should return `42` with `hr=0x00000000`. Leave the client at its Enter prompt. Open **Task Manager > Details** and inspect the **User name** column for the lab's `CalcSrv.exe` and `CalcSrvClient.exe` processes. If the column is hidden, right-click a column heading, choose **Select columns**, and enable **User name**. The server should run as **ComLabRunAs**, while the client still runs as the account printed by `whoami`. Record both identities: changing `RunAs` changes the server's account, not the caller whose permissions COM checks.
+
+        Press Enter to release the object and let the server exit. Restore the original **Identity** setting recorded during preparation, click **Apply**, and confirm a fresh client succeeds. If the test fails, record the actual HRESULT and check that `ComLabRunAs` can read and execute the lab binaries; do not broaden the caller's DCOM permissions to compensate.
+5. **Verify recovery:** confirm the original Launch/Activation permissions, Access permissions, and Identity settings are all restored, and a fresh client succeeds. Restoring Local Activation alone does not undo an Access or `RunAs` change. Do not broaden permissions to "Everyone" or "Full Control" to make the test pass.
 6. Write the resulting decision tree into your notes:
 
 ```
@@ -785,6 +850,8 @@ E_ACCESSDENIED on activation
 └── Remote? → also check MachineAccessRestriction, firewall, and
               the authentication-level hardening (Event 10036/10037)
 ```
+
+**When finished:** preserve your notes and relevant event details outside the VM, then restore **Before Lab 7.2**. On a dedicated test machine, restore the original AppID permissions and server identity and remove disposable test accounts. Run the client again to confirm local activation works before starting Lab 7.3.
 
 ---
 
