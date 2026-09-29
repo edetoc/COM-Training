@@ -13,7 +13,7 @@ Two families of interfaces that the main modules use but don't teach:
   - [A.1.1 The idea](#a11-the-idea)
   - [A.1.2 `IMoniker`](#a12-imoniker)
   - [A.1.3 The standard moniker types](#a13-the-standard-moniker-types)
-  - [A.1.4 Using monikers — the three APIs](#a14-using-monikers--the-three-apis)
+  - [A.1.4 Using monikers — three ways](#a14-using-monikers--three-ways)
   - [A.1.5 The Running Object Table (ROT)](#a15-the-running-object-table-rot)
   - [A.1.6 Moniker error codes](#a16-moniker-error-codes)
 - [A.2 Persistence — the `IPersist` family](#a2-persistence--the-ipersist-family)
@@ -71,7 +71,11 @@ struct IMoniker : public IPersistStream        // note: monikers are themselves 
 
 You will almost never implement this. You will frequently *use* `BindToObject` — usually indirectly.
 
-`IBindCtx` is a scratchpad for one binding operation: a timeout, options, and a table of objects bound so far (so a composite moniker doesn't bind the same thing twice). `CreateBindCtx(0, &pbc)` gives you a default one.
+**Who implements it, then?** Windows, for the standard types in §A.1.3, plus the few products that define their own naming scheme, such as WMI's `winmgmts:` moniker. Making *your* objects reachable by name doesn't require a moniker either: you implement the interfaces the standard monikers call. A file moniker creates your object and calls its `IPersistFile::Load` with the path; an item moniker asks its container's `IOleItemContainer` for the named item. Writing a correct moniker is hard, because combining monikers, inverses, equality, and hashing (used to find already-running objects, §A.1.5) all have subtle rules.
+
+**Why derive from `IPersistStream`?** Monikers are designed to be saved and reloaded while still naming the same object. The original use was OLE linking: a Word document containing a linked Excel range stores that link's moniker, such as `C:\Book.xlsx!Sheet1!A1:B7`, in the document file, then binds it again when reopened. `Save` and `Load` write and read the moniker's data, and `GetClassID` (from `IPersist`) records which kind of moniker wrote it, so COM can recreate the right one. A pointer moniker wraps a live interface pointer, so it refuses to be saved.
+
+`IBindCtx` is a **bind context**: a temporary object created for one binding request and shared by every moniker taking part. It carries the request's options, such as a deadline, and keeps each object it loads alive: when binding `C:\Book.xlsx!Sheet1!A1:B7`, the workbook stays open while `Sheet1` and `A1:B7` are resolved. Those objects stay loaded until you release the bind context, so release it when the binding is done. `CreateBindCtx(0, &pbc)` gives you a default one.
 
 ## A.1.3 The standard moniker types
 
@@ -90,36 +94,74 @@ You will almost never implement this. You will frequently *use* `BindToObject` �
 
 **Composition** is what makes monikers more than a lookup table. `C:\Book.xlsx!Sheet1!A1:B7` is a file moniker composed with two item monikers. Binding walks left to right: bind the file, ask *it* to resolve `Sheet1`, ask *that* to resolve `A1:B7`. Each moniker only understands its own step.
 
-## A.1.4 Using monikers — the three APIs
+## A.1.4 Using monikers — three ways
 
-### `CoGetObject` — the one you'll actually use
+### `CoGetObject` — when you just want the object
 
 ```cpp
 IUnknown* pUnk = nullptr;
 HRESULT hr = CoGetObject(L"C:\\Reports\\Q3.xlsx", nullptr, IID_IUnknown, (void**)&pUnk);
+if (SUCCEEDED(hr))
+{
+    CComPtr<IDispatch> book;                         // Excel's Workbook object
+    hr = pUnk->QueryInterface(IID_PPV_ARGS(&book));
+    CComVariant name;
+    if (SUCCEEDED(hr))
+        hr = book.GetPropertyByName(L"Name", &name);
+    if (SUCCEEDED(hr) && name.vt == VT_BSTR)
+        wprintf(L"Workbook: %s\n", name.bstrVal);    // Workbook: Q3.xlsx
+    pUnk->Release();
+}
 ```
 
-It parses the display name into a moniker, binds it, and releases the moniker — the whole sequence in one call. Module 7's elevation moniker uses exactly this, with a `BIND_OPTS3` to carry the parent window and class context.
+It parses the display name into a moniker, binds it, and releases the moniker — the whole sequence in one call. For an `.xlsx` file, binding returns Excel's Workbook object, opening the file in Excel if it isn't already open. The code then uses it like any Automation object (Module 5): it asks for `IDispatch` and reads the `Name` property. Module 7's elevation moniker uses `CoGetObject` too, with a `BIND_OPTS3` to carry the parent window and class context.
 
 ### `MkParseDisplayName` — when you need the moniker itself
 
-```cpp
-IBindCtx* pbc = nullptr;
-CreateBindCtx(0, &pbc);
+Use it when you want to do something with the name other than bind to it immediately:
 
-ULONG chEaten = 0;
-IMoniker* pmk = nullptr;
-HRESULT hr = MkParseDisplayName(pbc, L"C:\\Reports\\Q3.xlsx", &chEaten, &pmk);
-if (SUCCEEDED(hr))
+- **Check whether the object is already running** without starting it, by passing the moniker to the ROT (§A.1.5).
+- **Read a file's stored data without starting its application**, with `BindToStorage`.
+- **Save the name and bind later** through `IPersistStream`, as OLE links do.
+- **Diagnose a failing name:** `chEaten` shows where parsing stopped, and `GetDisplayName` shows how the string was interpreted.
+
+This example uses the moniker to look up the Running Object Table first, so it binds only if `Q3.xlsx` is already open and never starts Excel:
+
+```cpp
+HRESULT UseWorkbookIfOpen()
 {
-    IUnknown* pUnk = nullptr;
-    hr = pmk->BindToObject(pbc, nullptr, IID_IUnknown, (void**)&pUnk);
-    // ...
-    if (pUnk) pUnk->Release();
-    pmk->Release();
+    CComPtr<IBindCtx> pbc;
+    HRESULT hr = CreateBindCtx(0, &pbc);
+    if (FAILED(hr))
+        return hr;
+
+    ULONG chEaten = 0;
+    CComPtr<IMoniker> pmk;                          // also releases a partial moniker on failure
+    hr = MkParseDisplayName(pbc, L"C:\\Reports\\Q3.xlsx", &chEaten, &pmk);
+    if (FAILED(hr))
+    {
+        wprintf(L"Parsing stopped after %lu characters: 0x%08lX\n", chEaten, hr);
+        return hr;
+    }
+
+    CComPtr<IRunningObjectTable> rot;
+    hr = pbc->GetRunningObjectTable(&rot);
+    if (FAILED(hr))
+        return hr;
+    if (rot->IsRunning(pmk) != S_OK)
+    {
+        wprintf(L"Q3.xlsx is not open.\n");
+        return S_FALSE;
+    }
+
+    CComPtr<IUnknown> pUnk;
+    hr = pmk->BindToObject(pbc, nullptr, IID_PPV_ARGS(&pUnk));
+    // ... use pUnk, as in the CoGetObject example
+    return hr;
 }
-pbc->Release();
 ```
+
+Because the file is open, `BindToObject` returns the workbook already in Excel. If the workbook closes between the check and the bind, binding opens it again; `rot->GetObject(pmk, &pUnk)` retrieves only a running object.
 
 > **`chEaten` is a diagnostic gift.** On failure it tells you **how many characters were successfully parsed** before the parser gave up. That's the exact offset of the syntax error in the display name — invaluable when a customer's connection string or moniker fails with a generic error.
 
