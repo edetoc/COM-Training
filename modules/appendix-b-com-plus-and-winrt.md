@@ -29,13 +29,15 @@ Two ecosystems built *on* COM that you'll meet in tickets. Neither replaces what
 
 ## B.1.1 What it is and why it exists
 
-Classic COM gives you activation, lifetime, and marshaling. It gives you nothing for the problems every business application has: transactions spanning multiple resources, connection pooling, role-based authorization, asynchronous invocation.
+Classic COM creates objects, manages their lifetime, and carries calls between processes. It doesn't help with the infrastructure most server-side business applications need: keeping several database updates all-or-nothing (**transactions**), reusing expensive objects instead of recreating them (**object pooling**), controlling which users may call which methods (**role-based security**), and queuing calls to run later. Without COM+, each component has to write that code itself.
 
 **Microsoft Transaction Server (MTS)**, shipped for NT 4, bolted those on. In Windows 2000 it merged with COM to become **COM+**. It is still present in every Windows Server release today.
 
 > **The COM+ idea: declare your requirements; let the runtime supply the plumbing.**
 
 You mark a component "requires a transaction," and COM+ interposes itself between the caller and your object, starting and committing a DTC transaction around your calls. Your code contains no transaction API calls at all.
+
+> **MS DTC** (Microsoft Distributed Transaction Coordinator) is a Windows service, `MSDTC`, that lets one transaction span several **resource managers** — systems that store data, such as SQL Server databases or Microsoft Message Queuing (MSMQ) queues, possibly on different machines. To finish, it uses **two-phase commit**: it first asks every participant whether it can commit, then tells them all to commit, or all to roll back. Either every update happens, or none does.
 
 ## B.1.2 What COM+ adds
 
@@ -61,7 +63,15 @@ You mark a component "requires a transaction," and COM+ interposes itself betwee
 
 A server application is essentially a managed `DllSurrogate` ([Lab 7.1 Part B](07-dcom-and-security.md#part-b-compare-with-a-dll-surrogate)) with services layered on. Everything you know about AppID identity and permissions applies.
 
-**Context** is the mechanism. When a COM+ component is activated, the runtime places it in a **context** carrying its declared attributes. Calls crossing a context boundary are **intercepted** — and that interception is where transactions, security checks, and JIT activation happen.
+**Context** is the mechanism that delivers COM+ services. A context is a set of run-time properties — for example, "part of transaction T" or "role checks on" — shared by one or more objects. Every object belongs to exactly one context, and every context lives inside one apartment; an apartment can hold several contexts.
+
+How it works:
+
+1. **At activation**, COM+ reads the component's settings from the catalog and compares them with the creator's context. If the creator's context already meets every requirement, the new object joins it. Otherwise COM+ creates a new context for it, and some properties flow across: a component that supports transactions joins its caller's transaction, but gets its own context so it can cast its own vote.
+2. **Calls across a context boundary go through a lightweight proxy**, which adjusts the environment for the callee: begin or join a transaction, check the caller's role, create the object just in time. This is **interception**. Calls between objects in the same context are direct.
+3. **Code inside the object reads or changes its context** through the object context (`GetObjectContext`, §B.1.4) — for example, to vote on the transaction.
+
+Classic components that aren't configured in COM+ ignore most of this: they run in their caller's context, or, if their threading model doesn't fit the caller's apartment, in the **default context** of a suitable apartment.
 
 ```
    Caller's context                Interception             Object's context
@@ -72,9 +82,18 @@ A server application is essentially a managed `DllSurrogate` ([Lab 7.1 Part B](0
  └──────────────────┘        └────────────────────┘      └──────────────────┘
 ```
 
-This is the same proxy/interception idea as Module 3's apartment marshaling — a different boundary, same shape.
+This is the same proxy/interception idea as Module 3's apartment marshaling — a different boundary, same shape. The same rule follows: **an interface pointer belongs to its context.** COM+ converts pointers passed as method parameters automatically, but a pointer shared another way, such as through a global variable, must be marshaled with `CoMarshalInterface`/`CoUnmarshalInterface`. Otherwise calls skip the proxy and the services it provides.
 
-The **catalog** is COM+'s configuration store (`comexp.msc` / *Component Services*), scriptable through the `COMAdmin` objects:
+The **catalog** is COM+'s configuration store: every declared attribute the runtime reads when it builds a context lives here. You view it in *Component Services* (`comexp.msc`), whose folder tree mirrors the catalog's collections. It holds:
+
+- **Machine-wide settings** (`LocalComputer`), such as the default authentication level and transaction time-out.
+- **Applications** (`Applications`): server or library, the account the application runs as, security settings, how long an idle process stays running, and crash-dump options.
+- **Roles and their members** (`Roles`, `UsersInRole`): which Windows users and groups belong to each role.
+- **Components** (`Components`): each configured class, by CLSID and DLL path, with its declared services — transaction requirement, JIT activation, object pooling, synchronization, and role checks.
+- **Interfaces and methods** (`InterfacesForComponent`, `MethodsForInterface`): which roles may call each one.
+- **Event subscriptions** (`SubscriptionsForComponent`) for loosely coupled events.
+
+Scripts reach the same collections through the `COMAdmin` objects; edits are written only when you call `SaveChanges()`:
 
 ```powershell
 $admin = New-Object -ComObject COMAdmin.COMAdminCatalog
@@ -157,7 +176,10 @@ The `/ProcessID:{GUID}` in the command line is the COM+ application's AppID. Loo
 
 ## B.2.1 WinRT *is* COM
 
-This is the fact that matters. The Windows Runtime is not a replacement for COM; it's COM with a stricter contract and better metadata.
+This is the fact that matters. The Windows Runtime is not a replacement for COM; it's COM with **stricter rules** and **mandatory metadata**:
+
+- **Stricter rules:** every interface derives from `IInspectable`, method signatures may use only a fixed set of types (no raw pointers or `VARIANT`), and strings, collections, events, errors, and asynchronous operations each follow one prescribed pattern (§B.2.2).
+- **Mandatory metadata:** every type is described in a `.winmd` file shipped with the component — unlike classic COM, where a type library is optional and can't express everything. Language bindings such as C++/WinRT are generated from it.
 
 ```cpp
 struct IInspectable : public IUnknown          // <- IUnknown. Still.
