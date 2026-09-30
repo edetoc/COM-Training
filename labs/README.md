@@ -23,7 +23,7 @@ The progression below describes concepts, not a Stage 5 build dependency chain.
 | 4 | [`stage-4-atl-server/`](stage-4-atl-server/) | The dual-interface ATL rewrite with a type library and events | 5.1, 5.2, 6.2, 6.3 |
 | 5 | [`stage-5-exe-server/`](stage-5-exe-server/) | EXE server, surrogate-capable DLL, client, and matching proxy/stub | 7.1, 7.2, 7.3 |
 
-Labs 1.3, 8.1 and 8.2 need no starting code at all.
+Lab 1.3 needs no starting code at all.
 
 ## How to use a stage
 
