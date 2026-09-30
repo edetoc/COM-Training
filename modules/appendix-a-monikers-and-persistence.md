@@ -253,7 +253,9 @@ Note the last row: a moniker failure very often bottoms out in an ordinary activ
 
 ## A.2.1 The problem
 
-A COM object's state is private. The client can't serialize it — it doesn't know the layout (Module 0). So the object must serialize *itself*, through a standard interface, into a medium the client supplies.
+An object's **state** is the data it holds at a given moment — for a shortcut, its target path, arguments, and icon. **Persistence** means saving that state so an equivalent object can be recreated later.
+
+The **client** — the code using the object through its interface pointers, such as your program or an application saving a document that contains the object — can't do this itself. It sees only the object's interfaces, never its fields, so it doesn't know what data the object holds or how it is laid out in memory (Module 0). So the object must **serialize itself** — convert its state into bytes — through a standard interface, into a medium the client supplies: a stream, a file, or a storage. The client decides *where*; the object decides *what* and *how*.
 
 ```cpp
 struct IPersist : public IUnknown
@@ -265,6 +267,16 @@ struct IPersist : public IUnknown
 That single method is the root of the family, and it's the key to the whole design: the persisted data records the **CLSID**, so a loader can `CoCreateInstance` the right class and hand it its own data back.
 
 ## A.2.2 The family
+
+**Two sides, two kinds of interface.** The `IPersist*` interfaces are implemented by the **object being saved**: they mean "save yourself here" and "load yourself from here." `IStream` and `IStorage` are the **places** it saves into. Windows provides them (in memory, in a file, or inside a compound file); the client creates one and hands it to the object. They come in matching pairs:
+
+| The object implements | The client passes | Think of it as |
+|---|---|---|
+| `IPersistStream` | An `IStream` | One sequence of bytes, like an open file |
+| `IPersistStorage` | An `IStorage` | A folder of streams and sub-folders, inside one file |
+| `IPersistFile` | A file path | "Open the file yourself" |
+
+The client uses `QueryInterface` to find out which of these the object supports, then supplies the matching place. The full family:
 
 | Interface | Medium | Typical use |
 |---|---|---|
@@ -286,7 +298,9 @@ struct IPersistStream : public IPersist
 };
 ```
 
-> **`IsDirty` returns `S_FALSE` for "clean."** Both values are success. This is the Module 1 §1.5 trap in its natural habitat — `if (hr == S_OK)` here silently means "always dirty."
+An object is **dirty** when its state has changed since it was last saved or loaded; `IsDirty` asks whether it has unsaved changes.
+
+> **`IsDirty` returns `S_FALSE` for "clean."** Both values are success, so `if (SUCCEEDED(hr))` silently means "always dirty" — the Module 1 §1.5 trap of treating `S_FALSE` as `S_OK`. Check for failure first, then test `hr == S_OK`.
 
 You already used this family in Module 0's hello-world:
 
@@ -343,19 +357,23 @@ GetHGlobalFromStream(pStm, &hg);       // now you have the bytes
 
 **A file system inside a single file.** An `IStorage` is a directory; it contains named sub-storages and named `IStream`s.
 
+Why not just one stream? So several objects can share one file without knowing each other's formats. For example, when Word saves a document containing an Excel chart, it gives the chart its own sub-storage, and the chart saves itself into it through `IPersistStorage`. Here is the inside of such a document:
+
 ```
-  Q3.xlsx  (a compound file)
-   ├── [storage] Workbook
-   │      ├── [stream] Book
-   │      └── [stream] Styles
-   ├── [stream]  SummaryInformation
-   └── [storage] Macros
-          └── [stream] VBA
+  Report.doc  (legacy Word format, simplified)
+   ├── [stream]  WordDocument         ┐ Word's own data
+   ├── [stream]  1Table               ┘
+   ├── [stream]  SummaryInformation   title, author, and so on
+   └── [storage] ObjectPool
+          └── [storage] _1234567      the embedded Excel chart
+                 └── ...              streams written by Excel, not Word
 ```
+
+The example below uses the same format and APIs to create a new, much simpler compound file containing a single stream.
 
 ```cpp
 IStorage* pStg = nullptr;
-HRESULT hr = StgCreateStorageEx(L"C:\\Temp\\doc.stg",
+HRESULT hr = StgCreateStorageEx(L"C:\\Temp\\demo.stg",
                                 STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
                                 STGFMT_STORAGE, 0, nullptr, nullptr,
                                 IID_IStorage, (void**)&pStg);
@@ -367,7 +385,7 @@ pStm->Write("hello", 5, nullptr);
 pStm->Commit(STGC_DEFAULT);
 pStm->Release();
 
-pStg->Commit(STGC_DEFAULT);      // transacted mode: nothing is durable until this
+pStg->Commit(STGC_DEFAULT);      // flushes buffers; with STGM_TRANSACTED, changes stay invisible until this
 pStg->Release();
 ```
 
@@ -431,7 +449,7 @@ HRESULT hr = StgIsStorageFile(path);      // S_OK = yes, S_FALSE = no
 
 4. Because `Revoke` was never called — the process crashed or lacked a cleanup path. Cleanup is lazy, so stale entries persist and clients bind to zombie objects. With `ROTFLAGS_REGISTRATIONKEEPSALIVE` the registration holds a **strong** reference, so it's exactly analogous to Module 5's missing `Unadvise`: a permanent leak that keeps both objects, and possibly the whole process, alive.
 
-5. **Not dirty.** `S_FALSE` means clean; `S_OK` means dirty. Both are successes. Writing `if (SUCCEEDED(hr))` or `if (hr == S_OK)`-style tests wrongly gives "always dirty," so the app re-saves unchanged documents — or, inverted, never saves changed ones. It's Module 1 §1.5's rule in the wild.
+5. **Not dirty.** `S_FALSE` means clean; `S_OK` means dirty. Both are successes, so testing `if (SUCCEEDED(hr))` wrongly gives "always dirty," and the app re-saves unchanged documents. Check for failure first, then test `hr == S_OK`. It's Module 1 §1.5's warning about treating `S_FALSE` as `S_OK`, in the wild.
 
 6. So that persisted data records **which class** wrote it. Without it, a loader holding a stream of bytes would have no way to know which `CoCreateInstance` to call before handing the bytes back via `Load`. It's what makes persistence round-trip across processes and machines.
 
@@ -451,7 +469,7 @@ HRESULT hr = StgIsStorageFile(path);      // S_OK = yes, S_FALSE = no
 4. On parse failure, read `chEaten` — it points at the character that broke.
 5. Every ROT `Register` needs a `Revoke`. It's a strong reference.
 6. Moniker failures often bottom out as Module 2 activation failures. Find the implied CLSID.
-7. `IsDirty` returns `S_FALSE` for clean. Never test `== S_OK`.
+7. `IsDirty` returns `S_FALSE` for clean. Test `hr == S_OK` for dirty, never `SUCCEEDED(hr)`.
 8. Persisted data carries the CLSID — that's what `IPersist::GetClassID` is for.
 9. `STG_E_SHAREVIOLATION` means mismatched `STGM_SHARE_*`, not necessarily an OS lock.
 10. `StgIsStorageFile` returns `S_FALSE` for "not a compound file" — success, not failure.
